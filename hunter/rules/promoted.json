@@ -1,0 +1,70 @@
+{
+  "comment": "Strong rules and their score floor. List a rule here only after it caught at least one known-bad release with zero clean hits and has a unit test. Each entry: {\"floor\": \"review\" | \"alert\" | null, \"test\": \"tests/test_rules.py::<name>\", \"evidence\": \"<short note on the evidence kept by the maintainers>\"}. A null floor switches the rule back to weak without deleting the entry.",
+  "strong": {
+    "alt_runtime_fetch": {
+      "floor": "review",
+      "test": "tests/test_rules.py::test_rule_hits_its_line[alt_runtime_fetch]",
+      "evidence": "internal rules review, 2026-10-09"
+    },
+    "env_dump_send": {
+      "floor": "review",
+      "test": "tests/test_rules.py::test_rule_hits_its_line[env_dump_send]",
+      "evidence": "internal rules review, 2026-10-09"
+    },
+    "exec_download_run": {
+      "floor": "review",
+      "test": "tests/test_rules.py::test_rule_hits_its_line[exec_download_run]",
+      "evidence": "internal rules review, 2026-10-09"
+    },
+    "js_dynamic_eval": {
+      "floor": "review",
+      "test": "tests/test_rules.py::test_rule_hits_its_line[js_dynamic_eval]",
+      "evidence": "internal rules review, 2026-10-09"
+    },
+    "js_global_require_alias": {
+      "floor": "review",
+      "test": "tests/test_rules.py::test_rule_hits_its_line[js_global_require_alias]",
+      "evidence": "internal rules review, 2026-10-09"
+    },
+    "js_obfuscator_names": {
+      "floor": "review",
+      "test": "tests/test_rules.py::test_rule_hits_its_line[js_obfuscator_names]",
+      "evidence": "internal rules review, 2026-10-09"
+    },
+    "net_oast_host": {
+      "floor": "review",
+      "test": "tests/test_rules.py::test_rule_hits_its_line[net_oast_host]",
+      "evidence": "internal rules review, 2026-10-09"
+    },
+    "net_sysinfo_send": {
+      "floor": "review",
+      "test": "tests/test_rules.py::test_rule_hits_its_line[net_sysinfo_send]",
+      "evidence": "internal rules review, 2026-10-09"
+    },
+    "npm_self_publish": {
+      "floor": "review",
+      "test": "tests/test_rules.py::test_rule_hits_its_line[npm_self_publish]",
+      "evidence": "internal rules review, 2026-10-09"
+    },
+    "obf_escape_runs": {
+      "floor": "review",
+      "test": "tests/test_rules.py::test_rule_hits_its_line[obf_escape_runs]",
+      "evidence": "internal rules review, 2026-10-09"
+    },
+    "obf_getattr_exec": {
+      "floor": "review",
+      "test": "tests/test_rules.py::test_rule_hits_its_line[obf_getattr_exec]",
+      "evidence": "internal rules review, 2026-10-09"
+    },
+    "pth_exec_line": {
+      "floor": "review",
+      "test": "tests/test_rules.py::test_rule_hits_its_line[pth_exec_line]",
+      "evidence": "internal rules review, 2026-10-09"
+    },
+    "py_exec_decoded": {
+      "floor": "review",
+      "test": "tests/test_rules.py::test_rule_hits_its_line[py_exec_decoded]",
+      "evidence": "internal rules review, 2026-10-09"
+    }
+  }
+}

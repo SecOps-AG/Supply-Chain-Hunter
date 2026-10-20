@@ -1,0 +1,28 @@
+{
+  "id": "npm_lockfile_noise",
+  "label": "benign",
+  "ecosystem": "npm",
+  "name": "color-hex-pad",
+  "old_version": "1.0.0",
+  "new_version": "1.0.1",
+  "rank": 42,
+  "old_time": "2025-06-01T00:00:00Z",
+  "new_time": "2025-07-01T00:00:00Z",
+  "old_publishers": [
+    "ada"
+  ],
+  "new_publishers": [
+    "ada"
+  ],
+  "registry_url": "https://www.npmjs.com/package/color-hex-pad/v/1.0.1",
+  "old_files": {
+    "package-lock.json": "{\"name\": \"color-hex-pad\", \"lockfileVersion\": 3}\n",
+    "CHANGELOG.md": "# Changes\n\n- 1.0.0\n",
+    "docs/guide.md": "See the readme.\n"
+  },
+  "new_files": {
+    "package-lock.json": "{\"name\": \"color-hex-pad\", \"lockfileVersion\": 3, \"packages\": {}}\n",
+    "CHANGELOG.md": "# Changes\n\n- 1.0.1 tidy the notes\n",
+    "docs/guide.md": "See the readme for usage.\n"
+  }
+}

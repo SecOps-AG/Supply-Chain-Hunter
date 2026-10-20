@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Hunter dashboard</title>
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/app.js" defer></script>
+<script src="/static/github_stars.js" defer></script>
+</head>
+<body>
+<header class="top">
+  <div class="top-in">
+    <div class="brand"><span class="mk" aria-hidden="true"></span><span class="bt">Hunter</span></div>
+    <nav class="tabs" aria-label="Pages">
+      <button type="button" data-tab="dash" aria-current="page">Dashboard</button>
+      <button type="button" data-tab="bench">Benchmark</button>
+    </nav>
+    <div class="grow"></div>
+    <span class="live off" id="live" role="status"><i aria-hidden="true"></i><span id="live-text">Connecting</span></span>
+    <a class="gh-stars" id="gh-stars" href="https://github.com/SecOps-AG/Supply-Chain-Hunter" target="_blank" rel="noopener noreferrer" aria-label="GitHub stars">
+      <svg class="gh-star" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 1.1l1.9 3.85 4.25.62-3.08 3 .73 4.23L8 10.8l-3.8 2 .73-4.23-3.08-3 4.25-.62z"/></svg>
+      <span class="gh-label">Stars</span>
+      <span class="gh-count" id="gh-star-count"></span>
+    </a>
+    <button type="button" class="ibtn" id="theme" aria-label="Switch light or dark theme">Theme</button>
+  </div>
+</header>
+
+<main class="wrap" id="page-dash">
+  <div class="phead">
+    <div>
+      <h1>Live pipeline</h1>
+      <div class="subrow">npm and PyPI releases and GitHub Actions tags watched by Hunter, from feed to alert.</div>
+    </div>
+    <div class="grow"></div>
+    <div class="seg" id="range" role="group" aria-label="Time range">
+      <button type="button" data-range="1h">1h</button>
+      <button type="button" data-range="24h" aria-pressed="true">24h</button>
+      <button type="button" data-range="7d">7d</button>
+      <button type="button" data-range="30d">30d</button>
+    </div>
+  </div>
+  <div class="offbar" id="offbar" role="alert"></div>
+
+  <section class="bento" aria-label="Summary">
+    <div class="tile hero k-hero s4" id="hero"></div>
+    <div class="tile kpi k s2" id="kpi-scanned"></div>
+    <div class="tile kpi k s2" id="kpi-triage"></div>
+    <div class="tile kpi k s2" id="kpi-confirmed"></div>
+    <div class="tile kpi k s2" id="kpi-latency"></div>
+  </section>
+
+  <section class="tile rail" aria-label="Pipeline">
+    <div class="th"><h2>Pipeline</h2><span class="hint" id="rail-hint"></span>
+      <div class="end rlg"><span><i class="lg-npm"></i>npm</span><span><i class="lg-pypi"></i>PyPI</span><span><i class="lg-esc"></i>escalated</span><span><i class="lg-mal"></i>malicious</span></div>
+    </div>
+    <div class="flow" id="flow"></div>
+    <div class="rfoot" id="rail-foot"></div>
+  </section>
+
+  <section class="bento" aria-label="Detections and activity">
+    <div class="tile s5 r-det">
+      <div class="th"><h2>Malicious detections</h2><span class="hint">Triage said malicious; the Analyst decides the alert</span>
+        <div class="end seg small" id="det-filter" role="group" aria-label="Detection filter">
+          <button type="button" data-f="all" aria-pressed="true">All</button>
+          <button type="button" data-f="malicious">Confirmed</button>
+          <button type="button" data-f="uncertain">Uncertain</button>
+          <button type="button" data-f="cleared">Cleared</button>
+        </div>
+      </div>
+      <div class="tb" id="detections"></div>
+    </div>
+    <div class="tile s4 r-act">
+      <div class="th"><h2>Activity</h2><span class="hint">Scout flags, verdicts and alerts</span></div>
+      <div class="tb" id="activity"></div>
+    </div>
+    <div class="tile s3 r-act">
+      <div class="th"><h2>Why releases reach Triage</h2></div>
+      <div class="tb" id="signals"></div>
+    </div>
+  </section>
+
+  <section class="tile" aria-label="Models and cost">
+    <div class="th"><h2>Models and cost</h2><span class="hint" id="cost-hint"></span></div>
+    <div class="tb cost-grid" id="cost"></div>
+  </section>
+
+  <section class="tile" aria-label="Findings">
+    <div class="th"><h2>Findings</h2><span class="hint" id="find-hint"></span></div>
+    <div class="tb">
+      <form class="filters" id="find-form" autocomplete="off">
+        <label>Package<input type="search" name="q" placeholder="name or version"></label>
+        <label>Show<select name="scope"><option value="triage">Reached Triage</option><option value="flagged">All Scout flags</option></select></label>
+        <label>Ecosystem<select name="ecosystem"><option value="">Any</option><option value="npm">npm</option><option value="pypi">PyPI</option><option value="github-actions">GitHub Actions</option></select></label>
+        <label>Final verdict<select name="verdict"><option value="">Any</option><option value="malicious">Analyst malicious</option><option value="uncertain">Analyst uncertain</option><option value="benign">Analyst benign</option><option value="triage benign">Triage benign</option><option value="triage uncertain">Triage uncertain</option><option value="triage malicious">Triage malicious (no Analyst yet)</option><option value="in triage">In Triage</option><option value="triage exhausted">Triage failed</option></select></label>
+        <label>Scout band<select name="band"><option value="">Any</option><option value="alert">alert</option><option value="review">review</option><option value="deferred">deferred</option></select></label>
+        <label>Stage reached<select name="stage"><option value="">Any</option><option value="scout">Scout</option><option value="triage">Triage</option><option value="analyst">Analyst</option><option value="webhook">Webhook</option></select></label>
+        <label>Signal<select name="signal" id="f-signal"><option value="">Any</option></select></label>
+        <label>Rule<select name="rule" id="f-rule"><option value="">Any</option></select></label>
+        <label>Min P(malice)<input type="number" name="min_p" min="0" max="1" step="0.05" placeholder="0.00"></label>
+        <label>Sort<select name="sort"><option value="">Newest</option><option value="probability">Highest P(malice)</option></select></label>
+        <label class="chk"><input type="checkbox" name="partial" value="1">Partial reads only</label>
+      </form>
+      <div class="tablewrap"><table class="grid" id="find-table">
+        <thead><tr><th>Time</th><th>Release</th><th>Scout</th><th>Triage</th><th>Analyst</th><th>Webhook</th><th>Signals</th></tr></thead>
+        <tbody></tbody>
+      </table></div>
+      <div class="pager"><span id="find-count"></span><span class="grow"></span><button type="button" class="ibtn" id="find-prev">Previous</button><button type="button" class="ibtn" id="find-next">Next</button></div>
+    </div>
+  </section>
+  <p class="foot">Package names, signals and model reports come from package contents and are shown as plain text. Model ids are what serve reports for each role.</p>
+</main>
+
+<main class="wrap" id="page-bench" hidden>
+  <div class="phead">
+    <div>
+      <h1>Decision model benchmark</h1>
+      <div class="subrow">One run: Luna, clef-flash, and Jev on the same malicious and clean releases.</div>
+    </div>
+  </div>
+  <div id="bench-body"></div>
+</main>
+
+<dialog id="dlg" aria-labelledby="dlg-title">
+  <div class="dlg-head"><h3 id="dlg-title"></h3><button type="button" class="ibtn" id="dlg-close">Close</button></div>
+  <div id="dlg-body"></div>
+</dialog>
+</body>
+</html>

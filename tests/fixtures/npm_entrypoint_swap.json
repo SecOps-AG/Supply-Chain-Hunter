@@ -1,0 +1,18 @@
+{
+  "id": "npm_entrypoint_swap",
+  "label": "review",
+  "ecosystem": "npm",
+  "name": "widget",
+  "old_version": "1.0.0",
+  "new_version": "1.0.1",
+  "rank": 4,
+  "registry_url": "https://example.test/widget",
+  "old_files": {
+    "package.json": "{\n  \"name\": \"widget\",\n  \"version\": \"1.0.0\",\n  \"main\": \"index.js\"\n}\n",
+    "index.js": "function add(a, b) {\n  return a + b;\n}\nmodule.exports = add;\n"
+  },
+  "new_files": {
+    "package.json": "{\n  \"name\": \"widget\",\n  \"version\": \"1.0.1\",\n  \"main\": \"index.js\"\n}\n",
+    "index.js": "!2CTev->O`q(9J[l#4EVgx/@Qbs*;L]n%6GXiz1BSdu,=N_p'8IZk\"3DUfw.?Par):K\\m$5FWhy0ARct+<M^o&7HYj!2CTev->O`q(9J[l#4EVgx/@Qbs*;L]n%6GXiz1BSdu,=N_p'8IZk\"3DUfw.?Par):K\\m$5FWhy0ARct+<M^o&7HYj!2CTev->O`q(9J[l#4EVgx/@Qbs*;L]n%6GXiz1B\n"
+  }
+}

@@ -1,0 +1,70 @@
+{
+  "model_id": "clef",
+  "estimator": "sklearn.linear_model.LogisticRegression",
+  "params": {
+    "C": 3.0,
+    "class_weight": "balanced",
+    "penalty": "l2",
+    "solver": "lbfgs"
+  },
+  "features": [
+    "noul_decode_then_run",
+    "noul_shell_child_process",
+    "noul_network",
+    "noul_credential_read",
+    "noul_persistence_path",
+    "noul_install_time_execution",
+    "noul_unrelated_new_dependency",
+    "noul_embedded_payload",
+    "noul_reviewer_instructions",
+    "lifecycle_script_edits",
+    "new_dependency_count",
+    "publisher_changed",
+    "short_release_gap",
+    "high_entropy_additions",
+    "literal_decode_exec",
+    "literal_shell",
+    "literal_raw_ip"
+  ],
+  "coefficients": [
+    1.0816857937105175,
+    2.377888226286993,
+    1.931827197530328,
+    1.9080216567495394,
+    2.3415962674399617,
+    1.8067115773904205,
+    5.596755554819609,
+    3.2782437506741697,
+    -2.1185061749611735,
+    3.312321227802156,
+    -2.9577500305148865,
+    -1.6272345583235253,
+    -2.1561507568551797,
+    -2.651574938555611,
+    -0.7848468789096666,
+    0.8361628855891953,
+    -1.0445908197700275
+  ],
+  "intercept": -2.620853674174758,
+  "cutoffs": {
+    "review": 0.9686033767722815,
+    "alert": 0.9873062765136149
+  },
+  "floors": {
+    "compound_install_payload": 0.86,
+    "phantom_or_typosquat": 0.62,
+    "entrypoint_payload": null,
+    "install_sidecar": 0.62,
+    "behavior_chains": null,
+    "jev_consensus": 0.62,
+    "rule_strong": 0.62
+  },
+  "holdout": {
+    "precision": null,
+    "recall": 0.953125,
+    "false_positive_rate": 0.0783132530120482,
+    "n": 728,
+    "method": "cross_validation"
+  },
+  "source": "refit"
+}

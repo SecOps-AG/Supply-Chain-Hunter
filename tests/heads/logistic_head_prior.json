@@ -1,0 +1,55 @@
+{
+  "model_id": "jev-1.13.0",
+  "estimator": "sklearn.linear_model.LogisticRegression",
+  "params": {
+    "C": 1.0,
+    "class_weight": "balanced",
+    "penalty": "l2",
+    "solver": "lbfgs"
+  },
+  "features": [
+    "noul_decode_then_run",
+    "noul_shell_child_process",
+    "noul_network",
+    "noul_credential_read",
+    "noul_persistence_path",
+    "noul_install_time_execution",
+    "noul_unrelated_new_dependency",
+    "noul_embedded_payload",
+    "noul_reviewer_instructions",
+    "lifecycle_script_edits",
+    "new_dependency_count",
+    "publisher_changed",
+    "short_release_gap",
+    "high_entropy_additions",
+    "literal_decode_exec",
+    "literal_shell",
+    "literal_raw_ip"
+  ],
+  "coefficients": [
+    0.36540357869577567,
+    0.3500277291200725,
+    0.35859953157728447,
+    0.35981623552926517,
+    0.031072956959588796,
+    0.350792177313902,
+    0.03302175637374741,
+    0.34313154556853653,
+    -0.08529733221844113,
+    0.12958847105241292,
+    0.0,
+    0.0,
+    0.3887654131572388,
+    0.3077484433162293,
+    0.3887654131572388,
+    0.3887654131572388,
+    0.3887654131572388
+  ],
+  "intercept": -1.9808051832118108,
+  "holdout": {
+    "precision": null,
+    "recall": null,
+    "n": 6
+  },
+  "source": "train"
+}

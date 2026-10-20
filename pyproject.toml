@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "supply-chain-hunter"
+version = "0.1.0"
+description = "Watch top PyPI, npm, and GitHub Actions releases, diff them, and classify hostile changes."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE", "hunter/clef_tokenizer/NOTICE", "hunter/jev_count/LICENSE"]
+requires-python = ">=3.11"
+dependencies = [
+  "typesafe-sdk>=0.7.1",
+  "scikit-learn>=1.4",
+  "tokenizers>=0.20",
+  "tiktoken>=0.7",
+  "regex>=2023.0",
+  "yara-python>=4.5,<5",
+]
+
+[project.urls]
+Homepage = "https://github.com/SecOps-AG/Supply-Chain-Hunter"
+Issues = "https://github.com/SecOps-AG/Supply-Chain-Hunter/issues"
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+feed = ["boto3>=1.34"]
+
+[project.scripts]
+hunter = "hunter.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["hunter*"]
+
+[tool.setuptools.package-data]
+hunter = ["*.json", "clef_tokenizer/*", "triage_skill/*.md", "jev_count/vocab/*", "jev_count/LICENSE", "jev_count/PIN", "rules/yar/*.yar", "rules/promoted.json", "dashboard/static/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

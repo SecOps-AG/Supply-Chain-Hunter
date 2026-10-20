@@ -1,0 +1,2 @@
+tokenizer.json is the Clef tokenizer published by Cloudflare under the Apache-2.0 license.
+Hunter uses it to count tokens on this machine. The model weights are not included.

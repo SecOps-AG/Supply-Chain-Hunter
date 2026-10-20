@@ -1,0 +1,22 @@
+{
+  "id": "npm_phantom_manifest",
+  "label": "review",
+  "ecosystem": "npm",
+  "name": "widget-http",
+  "old_version": "1.14.0",
+  "new_version": "1.14.1",
+  "rank": 12,
+  "old_time": "2026-03-30T18:00:00Z",
+  "new_time": "2026-03-31T02:00:00Z",
+  "old_publishers": ["ada"],
+  "new_publishers": ["ada"],
+  "registry_url": "https://www.npmjs.com/package/widget-http/v/1.14.1",
+  "old_files": {
+    "package/package.json": "{\n  \"name\": \"widget-http\",\n  \"version\": \"1.14.0\",\n  \"main\": \"index.js\",\n  \"scripts\": {\"prepare\": \"git-hooks\", \"test\": \"node index.js\"},\n  \"dependencies\": {\"follow-hops\": \"^1.0.0\"}\n}\n",
+    "package/index.js": "const hops = require(\"follow-hops\");\nfunction get(url) { return hops.fetch(url); }\nmodule.exports = { get };\n"
+  },
+  "new_files": {
+    "package/package.json": "{\n  \"name\": \"widget-http\",\n  \"version\": \"1.14.1\",\n  \"main\": \"index.js\",\n  \"scripts\": {\"test\": \"node index.js\"},\n  \"dependencies\": {\"follow-hops\": \"^1.0.0\", \"codec-pad\": \"^4.2.1\"}\n}\n",
+    "package/index.js": "const hops = require(\"follow-hops\");\nfunction get(url) { return hops.fetch(url); }\nmodule.exports = { get };\n"
+  }
+}

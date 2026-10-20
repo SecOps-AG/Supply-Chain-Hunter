@@ -1,0 +1,42 @@
+[Unit]
+Description=Supply Chain Hunter release watcher
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hunter
+Group=hunter
+WorkingDirectory=/var/lib/hunter
+ExecStart=/usr/bin/python3 -m hunter serve
+Environment=HUNTER_DB=/var/lib/hunter/hunter.sqlite3
+Environment=HUNTER_BIND=127.0.0.1
+Environment=HUNTER_PORT=8080
+Environment=HUNTER_TOP_N=15000
+Environment=HUNTER_POLL_INTERVAL=300
+Environment=HUNTER_WORKERS=4
+Environment=HUNTER_MAX_PENDING=2000
+# Narrow the watch with HUNTER_TOP_N, HUNTER_WORKERS, and HUNTER_POLL_INTERVAL.
+# Logs go to $HUNTER_LOG_DIR/hunter_YYYYMMDD.log (default ./logs) and stderr.
+# Optional: HUNTER_SKIP_PYPI, HUNTER_SKIP_NPM, HUNTER_SMART_ANALYSIS=0,
+# HUNTER_AI_MAX_ATTEMPTS, HUNTER_CLASSIFY_BATCH, HUNTER_TRIAGE_BUDGET,
+# HUNTER_ANALYST=0, HUNTER_ANALYST_BUDGET, HUNTER_TRIAGE_LESSONS.
+# Models (see docs/configuration.md): HUNTER_SMART_BACKEND (openai, anthropic,
+# or cursor), HUNTER_SMART_BASE_URL, HUNTER_SMART_MODEL, HUNTER_ANALYST_MODEL,
+# and optionally HUNTER_ANALYST_BACKEND / _BASE_URL for a separate provider.
+# Alerts are optional: ALERT_WEBHOOK_URL, ALERT_WEBHOOK_FORMAT=slack,
+# ALERT_WEBHOOK_HEADERS.
+# Put API keys (TYPESAFE_API_KEY or AI_GATEWAY_API_KEY, HUNTER_SMART_API_KEY,
+# HUNTER_ANALYST_API_KEY, CURSOR_API_KEY), ALERT_WEBHOOK_URL, and
+# ALERT_WEBHOOK_SECRET in this file. Do not commit it.
+# Public feed secrets, when used, go in the same file:
+# HUNTER_FEED_R2_ACCESS_KEY_ID and HUNTER_FEED_R2_SECRET_ACCESS_KEY.
+# Do not reuse CLOUDFLARE_API_TOKEN for R2.
+EnvironmentFile=-/etc/hunter.env
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=90
+
+[Install]
+WantedBy=multi-user.target

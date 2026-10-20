@@ -1,0 +1,20 @@
+{
+  "id": "pypi_sdist_prefix",
+  "label": "benign",
+  "ecosystem": "pypi",
+  "name": "spellnum",
+  "old_version": "0.5.12",
+  "new_version": "0.5.13",
+  "rank": 12,
+  "registry_url": "https://example.test/spellnum",
+  "old_files": {
+    "sdist/spellnum-0.5.12/spellnum/__init__.py": "!2CTev->O`q(9J[l#4EVgx/@Qbs*;L]n%6GXiz1BSdu,=N_p'8IZk\"3DUfw.?Par):K\\m$5FWhy0ARct+<M^o&7HYj!2CTev->O`q(9J[l#4EVgx/@Qbs*;L]n%6GXiz1BSdu,=N_p'8IZk\"3DUfw.?Par):K\\m$5FWhy0ARct+<M^o&7HYj!2CTev->O`q(9J[l#4EVgx/@Qbs*;L]n%6GXiz1B\n",
+    "sdist/spellnum-0.5.12/spellnum/data.py": "STABLE\n!2CTev->O`q(9J[l#4EVgx/@Qbs*;L]n%6GXiz1BSdu,=N_p'8IZk\"3DUfw.?Par):K\\m$5FWhy0ARct+<M^o&7HYj!2CTev->O`q(9J[l#4EVgx/@Qbs*;L]n%6GXiz1BSdu,=N_p'8IZk\"3DUfw.?Par):K\\m$5FWhy0ARct+<M^o&7HYj!2CTev->O`q(9J[l#4EVgx/@Qbs*;L]n%6GXiz1B\n",
+    "sdist/spellnum-0.5.12/setup.py": "from setuptools import setup\nsetup(name=\"spellnum\", version=\"0.5.12\")\n"
+  },
+  "new_files": {
+    "sdist/spellnum-0.5.13/spellnum/__init__.py": "!2CTev->O`q(9J[l#4EVgx/@Qbs*;L]n%6GXiz1BSdu,=N_p'8IZk\"3DUfw.?Par):K\\m$5FWhy0ARct+<M^o&7HYj!2CTev->O`q(9J[l#4EVgx/@Qbs*;L]n%6GXiz1BSdu,=N_p'8IZk\"3DUfw.?Par):K\\m$5FWhy0ARct+<M^o&7HYj!2CTev->O`q(9J[l#4EVgx/@Qbs*;L]n%6GXiz1B\n",
+    "sdist/spellnum-0.5.13/spellnum/data.py": "STABLE\n!2CTev->O`q(9J[l#4EVgx/@Qbs*;L]n%6GXiz1BSdu,=N_p'8IZk\"3DUfw.?Par):K\\m$5FWhy0ARct+<M^o&7HYj!2CTev->O`q(9J[l#4EVgx/@Qbs*;L]n%6GXiz1BSdu,=N_p'8IZk\"3DUfw.?Par):K\\m$5FWhy0ARct+<M^o&7HYj!2CTev->O`q(9J[l#4EVgx/@Qbs*;L]n%6GXiz1B\n",
+    "sdist/spellnum-0.5.13/setup.py": "from setuptools import setup\nsetup(name=\"spellnum\", version=\"0.5.13\")\n"
+  }
+}

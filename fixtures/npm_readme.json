@@ -1,0 +1,24 @@
+{
+  "id": "npm_readme",
+  "label": "benign",
+  "ecosystem": "npm",
+  "name": "color-hex-pad",
+  "old_version": "2.3.0",
+  "new_version": "2.3.1",
+  "rank": 40,
+  "old_time": "2026-01-01T00:00:00Z",
+  "new_time": "2026-03-01T00:00:00Z",
+  "old_publishers": [
+    "ada"
+  ],
+  "new_publishers": [
+    "ada"
+  ],
+  "registry_url": "https://www.npmjs.com/package/color-hex-pad/v/2.3.1",
+  "old_files": {
+    "README.md": "# color-hex-pad\n\nPad short hex colors.\n"
+  },
+  "new_files": {
+    "README.md": "# color-hex-pad\n\nPad short hex colors. Document the timeout option.\n"
+  }
+}

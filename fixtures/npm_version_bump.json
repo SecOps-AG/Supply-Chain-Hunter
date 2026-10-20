@@ -1,0 +1,26 @@
+{
+  "id": "npm_version_bump",
+  "label": "benign",
+  "ecosystem": "npm",
+  "name": "color-hex-pad",
+  "old_version": "2.4.0",
+  "new_version": "2.4.1",
+  "rank": 41,
+  "old_time": "2026-01-01T00:00:00Z",
+  "new_time": "2026-02-15T00:00:00Z",
+  "old_publishers": [
+    "ada"
+  ],
+  "new_publishers": [
+    "ada"
+  ],
+  "registry_url": "https://www.npmjs.com/package/color-hex-pad/v/2.4.1",
+  "old_files": {
+    "package.json": "{\n  \"name\": \"color-hex-pad\",\n  \"version\": \"2.4.0\",\n  \"main\": \"index.js\"\n}\n",
+    "index.js": "function pad(hex) {\n  return hex;\n}\n"
+  },
+  "new_files": {
+    "package.json": "{\n  \"name\": \"color-hex-pad\",\n  \"version\": \"2.4.1\",\n  \"main\": \"index.js\"\n}\n",
+    "index.js": "function pad(hex) {\n  return hex; // clarify the helper\n}\n"
+  }
+}

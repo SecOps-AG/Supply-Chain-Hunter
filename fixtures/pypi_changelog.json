@@ -1,0 +1,28 @@
+{
+  "id": "pypi_changelog",
+  "label": "benign",
+  "ecosystem": "pypi",
+  "name": "table-align",
+  "old_version": "0.9.0",
+  "new_version": "0.9.1",
+  "rank": 18,
+  "old_time": "2025-11-01T00:00:00Z",
+  "new_time": "2025-12-20T00:00:00Z",
+  "old_publishers": [
+    "mina"
+  ],
+  "new_publishers": [
+    "mina"
+  ],
+  "registry_url": "https://pypi.org/project/table-align/0.9.1/",
+  "old_files": {
+    "CHANGELOG.md": "# 0.9.0\n\nInitial notes.\n",
+    "docs/guide.rst": "Align tables.\n",
+    "README.md": "table-align lines up cells.\n"
+  },
+  "new_files": {
+    "CHANGELOG.md": "# 0.9.1\n\nClarify the helper.\n",
+    "docs/guide.rst": "Align tables in the terminal.\n",
+    "README.md": "table-align lines up cells in a grid.\n"
+  }
+}

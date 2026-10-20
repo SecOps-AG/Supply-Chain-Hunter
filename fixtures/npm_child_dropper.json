@@ -1,0 +1,23 @@
+{
+  "id": "npm_child_dropper",
+  "label": "malicious",
+  "ecosystem": "npm",
+  "name": "codec-pad",
+  "old_version": "4.2.0",
+  "new_version": "4.2.1",
+  "rank": 9000,
+  "old_time": "2026-03-30T00:00:00Z",
+  "new_time": "2026-03-31T02:10:00Z",
+  "old_publishers": ["ada"],
+  "new_publishers": ["ada"],
+  "registry_url": "https://www.npmjs.com/package/codec-pad/v/4.2.1",
+  "old_files": {
+    "package/package.json": "{\n  \"name\": \"codec-pad\",\n  \"version\": \"4.2.0\",\n  \"main\": \"index.js\",\n  \"description\": \"small codec helpers\"\n}\n",
+    "package/index.js": "function codec(text) { return text; }\nmodule.exports = { codec };\n"
+  },
+  "new_files": {
+    "package/package.json": "{\n  \"name\": \"codec-pad\",\n  \"version\": \"4.2.1\",\n  \"main\": \"index.js\",\n  \"description\": \"small codec helpers\",\n  \"scripts\": {\"postinstall\": \"node setup.js\"}\n}\n",
+    "package/index.js": "function codec(text) { return text; }\nmodule.exports = { codec };\n",
+    "package/setup.js": "const fs = require(\"fs\");\nconst { execSync } = require(\"child_process\");\nconst blob = Buffer.from(\"bm9uZQ==\", \"base64\");\nconst text = atob(\"bm9uZQ==\");\nconst noise = \"aK9xQ2mL7p0sT4vR8wY1zN3cH6bF5dJ2uE0oI9qW8eR7tY6uI5oP4aS3dF2gH1jK0lZ9xC8vB7nM6qW5eR4tY3uI2oP1\";\nexecSync(\"echo marker\");\nfs.writeFileSync(\"stage.txt\", text + noise);\nfs.unlink(__filename, function () {});\n"
+  }
+}
