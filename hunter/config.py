@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 
 from hunter import JEV_MODEL_ID
 from hunter.clef import DEFAULT_CLEF_MODEL, resolve_clef_model
+from hunter.luna import DEFAULT_LUNA_MODEL, resolve_luna_model
 from hunter.jev import resolve_jev_base_url, resolve_jev_model
 from hunter.llm import (
     CURSOR_BACKEND,
@@ -238,6 +239,7 @@ class Config:
     port: int = 8080
     scout_model: str = DEFAULT_SCOUT_MODEL
     clef_model: str = DEFAULT_CLEF_MODEL
+    luna_model: str = DEFAULT_LUNA_MODEL
     scout_daily_usd_cap: float | None = None
     scout_prices: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_USD_PER_M_INPUT))
     jev_model: str = JEV_MODEL_ID
@@ -375,7 +377,11 @@ class Config:
         return bool(self.dash_publish and self.feed_configured() and self.dash_public_base_url)
 
     def scout_model_id(self) -> str:
-        return self.clef_model if self.scout_model == "clef" else self.jev_model
+        if self.scout_model == "clef":
+            return self.clef_model
+        if self.scout_model == "luna":
+            return self.luna_model
+        return self.jev_model
 
     @classmethod
     def from_env(cls) -> Config:
@@ -417,6 +423,7 @@ class Config:
             port=int(os.environ.get("HUNTER_PORT", "8080")),
             scout_model=scout_model_from_env(),
             clef_model=resolve_clef_model(),
+            luna_model=resolve_luna_model(),
             scout_daily_usd_cap=cap_from_env(),
             scout_prices=prices_from_env(),
             jev_model=resolve_jev_model(),
@@ -562,8 +569,10 @@ def smart_analysis_enabled(config: Config) -> bool:
 def active_role_models(config: Config) -> dict:
     """Selected models for the three roles. No secrets.
 
-    The decision model (Scout) is Jev or Clef. OpenRouter ids are accepted for
-    the mid-tier, balanced model (Triage) and the Frontier model (Analyst).
+    The decision model (Scout) is Jev, Clef, or Luna. Luna is the one OpenRouter
+    model allowed there: GPT-6 Luna Decisions on OpenRouter's decisions
+    endpoint. Other OpenRouter ids are accepted for the mid-tier, balanced model
+    (Triage) and the Frontier model (Analyst).
     """
     from hunter.openrouter import openrouter_key_is_set
 
@@ -581,7 +590,7 @@ def active_role_models(config: Config) -> dict:
             "role": "Scout",
             "provider": config.scout_model,
             "model": config.scout_model_id(),
-            "openrouter": False,
+            "openrouter": config.scout_model == "luna",
         },
         "mid_tier_model": {
             "label": "mid-tier, balanced model",
