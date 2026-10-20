@@ -23,6 +23,7 @@ TAB_RUN = "\t" * 400
 JS_EVAL = re.compile(r"\beval\s*\(|\bFunction\s*\(")
 PY_EXEC = re.compile(r"\b(exec|eval)\s*\(")
 DEPENDENCY_KEYS = ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies")
+GIT_SHORTHAND = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[0-9a-f]{7,40}$")
 REMOTE_ARCHIVE = re.compile(r"^https?://\S+\.(tgz|tar\.gz|tar|zip)(?:[?#]\S*)?$", re.IGNORECASE)
 
 
@@ -125,7 +126,12 @@ def _risky_dependency_spec(spec: str) -> bool:
         return True
     if IP_URL.match(value):
         return True
-    return bool(REMOTE_ARCHIVE.match(value))
+    if bool(REMOTE_ARCHIVE.match(value)):
+        return True
+    # Code pulled from a git host instead of the registry, so the registry tarball never shows it.
+    if lowered.startswith(("github:", "gitlab:", "bitbucket:", "git+", "git://", "git@")):
+        return True
+    return bool(GIT_SHORTHAND.match(value))
 
 
 def _line_of(text: str, needle: str) -> int:
@@ -142,6 +148,45 @@ def _url_dependency(context: FileContext) -> Iterator[tuple[int, str]]:
             continue
         yield _line_of(context.new, f'"{name}"'), f'"{name}": "{spec}"'
         return
+
+
+NOT_CODE = (".md", ".map", ".d.ts", ".txt", ".lock", "license", "changelog.md")
+
+
+def _phantom_dependency(context: FileContext) -> Iterator[tuple[int, str]]:
+    """A runtime dependency added in this release that no shipped file ever loads.
+
+    Only `dependencies` and `optionalDependencies` count: those are installed for
+    every user, so an unused one exists only for its own install scripts.
+    """
+    if not context.path.endswith("package.json") or context.path.count("/") > 1:
+        return
+    try:
+        old_data = json.loads(context.old) if context.old else {}
+        new_data = json.loads(context.new)
+    except ValueError:
+        return
+    if not isinstance(new_data, dict) or not isinstance(old_data, dict) or not old_data:
+        return
+    old_names = set()
+    for key in DEPENDENCY_KEYS:
+        if isinstance(old_data.get(key), dict):
+            old_names |= set(old_data[key])
+    added = []
+    for key in ("dependencies", "optionalDependencies"):
+        block = new_data.get(key)
+        if isinstance(block, dict):
+            added += [name for name in block if name not in old_names and not name.startswith("@types/")]
+    if not added or len(added) > 3:
+        return
+    files = context.new_files or {}
+    texts = [text for path, text in files.items()
+             if path != context.path and not path.lower().endswith(NOT_CODE)
+             and not path.lower().endswith(("package-lock.json", "yarn.lock", "pnpm-lock.yaml"))]
+    for name in added:
+        if not any(name in text for text in texts):
+            yield _line_of(context.new, f'"{name}"'), f'"{name}" added but never loaded'
+            return
 
 
 def _utf16(context: FileContext) -> Iterator[tuple[int, str]]:
@@ -166,6 +211,7 @@ RULES = {
     "py_hidden_whitespace": lambda context: _hidden_whitespace(context, PY_EXEC),
     "npm_url_dependency": _url_dependency,
     "utf16_code_file": _utf16,
+    "npm_phantom_dependency": _phantom_dependency,
     "h_new_host": _new_host,
 }
 
