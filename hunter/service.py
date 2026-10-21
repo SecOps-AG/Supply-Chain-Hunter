@@ -1166,6 +1166,19 @@ def _poll_actions_safely(db: Database, config: Config, client: GitHubClient, sto
         log.warning("actions poll failed: %s", exc)
 
 
+def _ground_truth_safely(
+    db: Database, config: Config, transport: HttpGet, stop: threading.Event | None = None
+) -> None:
+    from hunter.ground_truth import report_is_fresh, run_ground_truth
+
+    if report_is_fresh(config):
+        return
+    try:
+        run_ground_truth(db, config, transport=transport, stop=stop)
+    except Exception as exc:
+        log.warning("ground truth run failed: %s", exc)
+
+
 def _feed_loop(stop: threading.Event, interval: float, fn) -> None:
     while not stop.is_set():
         fn()
@@ -1459,6 +1472,19 @@ def serve(
                         "fn": lambda: _poll_actions_safely(db, config, actions_client, stop),
                     },
                     name="hunter-actions",
+                    daemon=True,
+                )
+            )
+        if config.ground_truth:
+            polls.append(
+                threading.Thread(
+                    target=_feed_loop,
+                    kwargs={
+                        "stop": stop,
+                        "interval": config.ground_truth_interval,
+                        "fn": lambda: _ground_truth_safely(db, config, transport, stop),
+                    },
+                    name="hunter-ground-truth",
                     daemon=True,
                 )
             )

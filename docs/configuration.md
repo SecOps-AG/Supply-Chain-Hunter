@@ -142,6 +142,31 @@ How it works: [github-actions.md](github-actions.md).
 
 Localhost `/health` adds a `github_actions` block with watched actions, recorded tags, tag events in the last day, and whether a token is set.
 
+## Ground truth (OSV `MAL-` and npm takedowns)
+
+Measures recall and time-to-detect on live traffic. For the npm and PyPI releases Hunter scored, it looks up OpenSSF malicious-packages (`MAL-` ids in OSV JSON) and checks whether npm replaced the package with its `0.0.1-security` holder. It only reads JSON: no package archive is downloaded and nothing is run.
+
+Run it by hand any time with `hunter ground-truth` (`--offline` uses the cached records only, `--days N` sets the window, `--full` prints every labeled release, `--out PATH` moves the report). `serve` runs it on a timer only when `HUNTER_GROUND_TRUTH` is on.
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `HUNTER_GROUND_TRUTH` | off | `on` runs the job in `serve` every interval. A report younger than the interval is not redone after a restart. |
+| `HUNTER_GROUND_TRUTH_SOURCE` | `api` | `api`: OSV.dev `querybatch` for the scored package names, then one fetch per new or changed `MAL-` record (cached). `git`: shallow, sparse clone of the malicious-packages repo (npm and PyPI folders only), updated with a depth-1 fetch. Needs `git`. |
+| `HUNTER_GROUND_TRUTH_DIR` | `ground-truth` next to the database | Record cache, git checkout, npm takedown cache, and `ground-truth-report.json`. |
+| `HUNTER_GROUND_TRUTH_INTERVAL` | `86400` | Seconds between runs (at least `3600`). |
+| `HUNTER_GROUND_TRUTH_DAYS` | `30` | Look-back window over scored releases. `0` means all. |
+| `HUNTER_GROUND_TRUTH_NPM_CHECKS` | `200` | Most npm names checked for a takedown per run; flagged and never-checked names first. `0` turns the registry checks off. A holder version seen in the npm feed still counts. |
+| `HUNTER_OSV_API` | `https://api.osv.dev` | OSV API base. |
+| `HUNTER_GROUND_TRUTH_REPO` | the OpenSSF malicious-packages repo | Git URL for the `git` source. |
+
+How releases are labeled:
+
+- **Malicious**: an OSV `MAL-` record lists the version or a range covers it, or the npm package was taken down (every version Hunter saw counts).
+- **Caught**: Scout put it in `review` or `alert`, or an alert was confirmed. **Confirmed** counts only confirmed alerts. Releases still `deferred` are left out and counted apart.
+- **Time-to-detect**: Hunter's flag time (Scout score time, or the confirmed-alert time) minus the earliest `MAL-` `published` time or takedown time, in hours. Negative means Hunter was first; `hunter_first` counts those.
+
+The summary has `malicious_seen`, `caught`, `missed`, `recall`, `confirmed`, `confirmed_recall`, time-to-detect stats (count, median, p90, mean, min, max), and the same counts per ecosystem and per source.
+
 ## Performance and storage
 
 | Variable | Default | What it does |

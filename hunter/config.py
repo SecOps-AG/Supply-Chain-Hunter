@@ -176,6 +176,13 @@ def _feed_title_from_env() -> str:
 
 # Most-used GitHub Actions, by dependent repositories (ecosyste.ms).
 ACTIONS_TOP_URL = "https://packages.ecosyste.ms/api/v1/registries/github%20actions/packages"
+OSV_API = "https://api.osv.dev"
+GROUND_TRUTH_REPO = "https://github.com/ossf/malicious-packages.git"
+
+
+def _ground_truth_source_from_env() -> str:
+    value = os.environ.get("HUNTER_GROUND_TRUTH_SOURCE", "").strip().lower()
+    return value if value in {"api", "git"} else "api"
 
 
 def _flag(name: str, default: bool = False) -> bool:
@@ -309,6 +316,16 @@ class Config:
     # Scout on new action tags (phase 2). Off until the Actions eval says it is ready.
     actions_scout: bool = False
     actions_scout_per_day: int = 100
+    # Ground-truth job (HUNTER_GROUND_TRUTH). Off by default. Compares scored releases with
+    # OSV MAL- records and npm takedowns; reads JSON only.
+    ground_truth: bool = False
+    ground_truth_dir: str = ""
+    ground_truth_source: str = "api"
+    ground_truth_interval: float = 24 * 3600
+    ground_truth_days: int = 30
+    ground_truth_npm_checks: int = 200
+    ground_truth_repo: str = GROUND_TRUTH_REPO
+    osv_api: str = OSV_API
     pypi_top_url: str = (
         "https://raw.githubusercontent.com/hugovk/top-pypi-packages/main/"
         "top-pypi-packages-30-days.min.json"
@@ -455,6 +472,16 @@ class Config:
             ),
             actions_scout=_flag("HUNTER_ACTIONS_SCOUT"),
             actions_scout_per_day=max(0, int(os.environ.get("HUNTER_ACTIONS_SCOUT_PER_DAY", "100"))),
+            ground_truth=_flag("HUNTER_GROUND_TRUTH"),
+            ground_truth_dir=os.environ.get("HUNTER_GROUND_TRUTH_DIR", "").strip(),
+            ground_truth_source=_ground_truth_source_from_env(),
+            ground_truth_interval=max(
+                3600.0, float(os.environ.get("HUNTER_GROUND_TRUTH_INTERVAL", str(24 * 3600)))
+            ),
+            ground_truth_days=max(0, int(os.environ.get("HUNTER_GROUND_TRUTH_DAYS", "30"))),
+            ground_truth_npm_checks=max(0, int(os.environ.get("HUNTER_GROUND_TRUTH_NPM_CHECKS", "200"))),
+            ground_truth_repo=os.environ.get("HUNTER_GROUND_TRUTH_REPO", "").strip() or GROUND_TRUTH_REPO,
+            osv_api=os.environ.get("HUNTER_OSV_API", "").strip() or OSV_API,
         )
 
 
