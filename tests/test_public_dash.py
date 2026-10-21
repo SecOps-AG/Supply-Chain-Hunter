@@ -171,6 +171,48 @@ def test_publish_uploads_live_and_release_objects(db):
     assert publish_public_dash(db, config, started=started, meter=None, client=client, now=moment) is False
 
 
+def test_failed_release_upload_is_retried_next_pass(db):
+    config = _dash_config()
+    client = MagicMock()
+    moment = utcnow()
+    started = time.monotonic()
+    failed: list[str] = []
+
+    def put_object(**kwargs):
+        if kwargs["Key"].startswith("live/r/") and not failed:
+            failed.append(kwargs["Key"])
+            raise TimeoutError("read timed out")
+
+    client.put_object.side_effect = put_object
+    assert publish_public_dash(db, config, started=started, meter=None, client=client, now=moment) is False
+    assert failed
+    client.put_object.reset_mock()
+    assert publish_public_dash(db, config, started=started, meter=None, client=client, now=moment) is True
+    keys = [call.kwargs["Key"] for call in client.put_object.call_args_list]
+    assert failed[0] in keys
+    assert LIVE_JSON_KEY not in keys
+    client.put_object.reset_mock()
+    assert publish_public_dash(db, config, started=started, meter=None, client=client, now=moment) is False
+    assert client.put_object.call_count == 0
+
+
+def test_live_hash_kept_when_only_a_release_upload_fails(db):
+    config = _dash_config()
+    client = MagicMock()
+    moment = utcnow()
+
+    def put_object(**kwargs):
+        if kwargs["Key"].startswith("live/r/"):
+            raise TimeoutError("read timed out")
+
+    client.put_object.side_effect = put_object
+    assert publish_public_dash(db, config, started=time.monotonic(), meter=None, client=client, now=moment) is False
+    state = db.public_dash_state()
+    assert state["live_hash"]
+    assert state["benchmark_hash"]
+    assert "TimeoutError" in (state["last_error"] or "")
+
+
 def test_put_feed_object_refuses_unknown_keys():
     client = MagicMock()
     with pytest.raises(ValueError, match="non-public"):

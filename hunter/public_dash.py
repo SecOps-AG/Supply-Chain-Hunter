@@ -10,7 +10,6 @@ import os
 import re
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 from datetime import datetime, timedelta
 from typing import Any
 from urllib.parse import quote
@@ -33,6 +32,7 @@ log = logging.getLogger("hunter.public_dash")
 LIVE_JSON_KEY = f"{LIVE_PREFIX}live.json"
 BENCHMARK_KEY = f"{LIVE_PREFIX}benchmark.json"
 FINDINGS_EXPORT_LIMIT = 5000
+# Per-request connect/read timeout for each R2 PUT.
 UPLOAD_TIMEOUT_S = 5.0
 DEBOUNCE_S = 2.0
 CACHE_LIVE = "public, max-age=2"
@@ -516,24 +516,25 @@ def publish_public_dash(
         benchmark = build_benchmark_document(config)
         bench_digest = stable_benchmark_digest(benchmark)
         state = db.public_dash_state()
-        uploader = client if client is not None else make_r2_client(config)
+        live_changed = state is None or state["live_hash"] != live_digest
+        bench_changed = state is None or state["benchmark_hash"] != bench_digest
+        uploader = client if client is not None else make_r2_client(config, timeout=UPLOAD_TIMEOUT_S)
         bucket = config.feed_r2_bucket
-        uploads: list[tuple[str, bytes, str]] = []
-        if state is None or state["live_hash"] != live_digest:
-            uploads.append((LIVE_JSON_KEY, _encode(live_document), CACHE_LIVE))
+        live_uploads: list[tuple[str, bytes, str]] = []
+        if live_changed:
+            live_uploads.append((LIVE_JSON_KEY, _encode(live_document), CACHE_LIVE))
             history_key = f"{LIVE_PREFIX}history/{today}.json"
             confirmed_key = f"{LIVE_PREFIX}confirmed/{today}.json"
-            uploads.append((history_key, _encode(build_daily_history(live_document, day=today)), CACHE_TODAY))
-            uploads.append(
+            live_uploads.append((history_key, _encode(build_daily_history(live_document, day=today)), CACHE_TODAY))
+            live_uploads.append(
                 (
                     confirmed_key,
                     _encode(build_daily_confirmed(live_document.get("findings") or {}, day=today)),
                     CACHE_TODAY,
                 )
             )
-        if state is None or state["benchmark_hash"] != bench_digest:
-            uploads.append((BENCHMARK_KEY, _encode(benchmark), CACHE_TODAY))
 
+        release_uploads: list[tuple[str, str, str, bytes]] = []
         release_keys = collect_release_keys(live_document.get("findings") or {}, live_document.get("snapshots") or {})
         for key in sorted(release_keys):
             eco, name, version = key.split(":", 2)
@@ -545,29 +546,23 @@ def publish_public_dash(
             digest = hashlib.sha256(body).hexdigest()
             if db.public_dash_release_hash(key) == digest:
                 continue
-            uploads.append((obj_key, body, CACHE_IMMUTABLE))
-            db.mark_public_dash_release(key, digest)
+            release_uploads.append((key, obj_key, digest, body))
 
-        if not uploads:
+        if not live_uploads and not bench_changed and not release_uploads:
             return False
 
-        def _run() -> None:
-            _upload_objects(uploader, bucket, uploads)
-
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(_run)
-            future.result(timeout=UPLOAD_TIMEOUT_S)
-
-        if state is None or state["live_hash"] != live_digest:
+        # Each hash is stored only after its own objects are on R2, so a
+        # failed or timed-out PUT is retried on the next pass.
+        if live_uploads:
+            _upload_objects(uploader, bucket, live_uploads)
             db.mark_public_dash_live_published(live_digest, when=now)
-        if state is None or state["benchmark_hash"] != bench_digest:
+        if bench_changed:
+            _upload_objects(uploader, bucket, [(BENCHMARK_KEY, _encode(benchmark), CACHE_TODAY)])
             db.mark_public_dash_benchmark_published(bench_digest, when=now)
+        for key, obj_key, digest, body in release_uploads:
+            _upload_objects(uploader, bucket, [(obj_key, body, CACHE_IMMUTABLE)])
+            db.mark_public_dash_release(key, digest)
         db.mark_public_dash_published_at(iso(now))
-    except FuturesTimeout:
-        message = "upload timed out after 5s"
-        log.warning("public dashboard upload failed: %s", message)
-        db.mark_public_dash_error(message)
-        return False
     except Exception as exc:
         message = _public_error(exc, config)
         log.warning("public dashboard upload failed: %s", message)
