@@ -19,6 +19,8 @@ TIERS = {"weak", "info"}
 # and an Actions release reads every rule, since an action's code is JS, Python or shell.
 ECOS = {"npm", "pypi", "both", "actions"}
 ACTIONS_ECOSYSTEM = "github-actions"
+# An Open VSX extension is JavaScript with a package.json, so it reads the npm rules.
+OPENVSX_ECOSYSTEM = "openvsx"
 COMMENTS = {"count", "skip"}
 NEWNESS = {"bytes", "rule"}
 CONFIRMERS = {"public_ip_url"}
@@ -43,6 +45,8 @@ class RuleSpec:
             return False
         if ecosystem is None or ecosystem == ACTIONS_ECOSYSTEM:
             return True
+        if ecosystem == OPENVSX_ECOSYSTEM:
+            return self.eco in {"both", "npm"}
         return self.eco == "both" or self.eco == ecosystem
 
 

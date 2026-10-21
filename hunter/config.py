@@ -185,6 +185,11 @@ def _ground_truth_source_from_env() -> str:
     return value if value in {"api", "git"} else "api"
 
 
+# Official MCP server registry. It asks aggregators to poll about once an hour.
+MCP_REGISTRY_URL = "https://registry.modelcontextprotocol.io"
+OPENVSX_URL = "https://open-vsx.org"
+
+
 def _flag(name: str, default: bool = False) -> bool:
     raw = os.environ.get(name)
     if raw is None:
@@ -326,6 +331,18 @@ class Config:
     ground_truth_npm_checks: int = 200
     ground_truth_repo: str = GROUND_TRUTH_REPO
     osv_api: str = OSV_API
+    # MCP registry as a watchlist source (HUNTER_MCP_REGISTRY). Off by default. Each
+    # server's npm and PyPI packages join the npm and PyPI watch, whatever their rank.
+    mcp_registry: bool = False
+    mcp_registry_url: str = MCP_REGISTRY_URL
+    mcp_poll_interval: float = 3600.0
+    # Open VSX extensions through the registry changes feed (HUNTER_OPENVSX). Off by default.
+    # Rules read every release; Scout reads a release only when a rule hit and HUNTER_OPENVSX_SCOUT is on.
+    openvsx: bool = False
+    openvsx_url: str = OPENVSX_URL
+    openvsx_poll_interval: float = 300.0
+    openvsx_page_size: int = 200
+    openvsx_scout: bool = False
     pypi_top_url: str = (
         "https://raw.githubusercontent.com/hugovk/top-pypi-packages/main/"
         "top-pypi-packages-30-days.min.json"
@@ -482,6 +499,14 @@ class Config:
             ground_truth_npm_checks=max(0, int(os.environ.get("HUNTER_GROUND_TRUTH_NPM_CHECKS", "200"))),
             ground_truth_repo=os.environ.get("HUNTER_GROUND_TRUTH_REPO", "").strip() or GROUND_TRUTH_REPO,
             osv_api=os.environ.get("HUNTER_OSV_API", "").strip() or OSV_API,
+            mcp_registry=_flag("HUNTER_MCP_REGISTRY"),
+            mcp_registry_url=os.environ.get("HUNTER_MCP_REGISTRY_URL", "").strip().rstrip("/") or MCP_REGISTRY_URL,
+            mcp_poll_interval=max(300.0, float(os.environ.get("HUNTER_MCP_POLL_INTERVAL", "3600"))),
+            openvsx=_flag("HUNTER_OPENVSX"),
+            openvsx_url=os.environ.get("HUNTER_OPENVSX_URL", "").strip().rstrip("/") or OPENVSX_URL,
+            openvsx_poll_interval=max(60.0, float(os.environ.get("HUNTER_OPENVSX_POLL_INTERVAL", "300"))),
+            openvsx_page_size=min(1000, max(1, int(os.environ.get("HUNTER_OPENVSX_PAGE_SIZE", "200")))),
+            openvsx_scout=_flag("HUNTER_OPENVSX_SCOUT"),
         )
 
 

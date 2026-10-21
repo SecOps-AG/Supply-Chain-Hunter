@@ -43,13 +43,14 @@ _LIVE_OBJECT = (
     rf"^{LIVE_PREFIX}benchmark\.json$|"
     rf"^{LIVE_PREFIX}history/{_DATE}\.json$|"
     rf"^{LIVE_PREFIX}confirmed/{_DATE}\.json$|"
-    rf"^{LIVE_PREFIX}r/(npm|pypi|github-actions)/[^/]+/[^/]+\.json$"
+    rf"^{LIVE_PREFIX}r/(npm|pypi|github-actions|openvsx)/[^/]+/[^/]+\.json$"
 )
 LIMITED_REVIEW_TEXT = "Hunter did not read the entire release."
 NPM_REGISTRY = "https://www.npmjs.com/"
 PYPI_REGISTRY = "https://pypi.org/"
 GITHUB_SITE = "https://github.com/"
-ECOSYSTEMS = frozenset({"npm", "pypi", "github-actions"})
+OPENVSX_SITE = "https://open-vsx.org/extension/"
+ECOSYSTEMS = frozenset({"npm", "pypi", "github-actions", "openvsx"})
 
 # Closed labels from the suspected-cause question. Unknown and free text stay out.
 PUBLIC_CAUSES = {
@@ -95,6 +96,8 @@ def public_registry_url(ecosystem: str, raw: object) -> str:
     if ecosystem == "pypi" and url.startswith(PYPI_REGISTRY):
         return url
     if ecosystem == "github-actions" and url.startswith(GITHUB_SITE):
+        return url
+    if ecosystem == "openvsx" and url.startswith(OPENVSX_SITE):
         return url
     return ""
 
@@ -193,12 +196,16 @@ def ecosystem_label(ecosystem: str) -> str:
         return "PyPI"
     if ecosystem == "github-actions":
         return "GitHub Actions"
+    if ecosystem == "openvsx":
+        return "Open VSX"
     return "npm"
 
 
 def alert_title(alert: PublicAlert) -> str:
     if alert.ecosystem == "github-actions":
         return f"Malicious GitHub Action: {alert.name} {alert.version}"
+    if alert.ecosystem == "openvsx":
+        return f"Malicious Open VSX extension: {alert.name} {alert.version}"
     return f"Malicious {ecosystem_label(alert.ecosystem)} package: {alert.name} {alert.version}"
 
 

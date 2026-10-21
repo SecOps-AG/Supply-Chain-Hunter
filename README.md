@@ -90,6 +90,8 @@ Commonly used settings:
 - `ALERT_WEBHOOK_URL`: receives a POST for each confirmed malicious release, as JSON or a Slack-compatible message. Set `ALERT_WEBHOOK_SECRET` to sign it with an HMAC. Failed deliveries are retried across restarts.
 - `HUNTER_LOG_DIR` (default `./logs`): one log line per release.
 - `HUNTER_ACTIONS=on`: also watch GitHub Actions.
+- `HUNTER_MCP_REGISTRY=on`: also watch the npm and PyPI packages listed in the official MCP server registry.
+- `HUNTER_OPENVSX=on`: also watch Open VSX extension releases.
 
 The full list, with defaults, is in [docs/configuration.md](docs/configuration.md).
 
