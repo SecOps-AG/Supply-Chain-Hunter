@@ -224,6 +224,47 @@ def test_release_objects_are_not_cached_as_immutable(db):
         assert "immutable" not in call["CacheControl"]
 
 
+def _published_release(db, name):
+    client = MagicMock()
+    publish_public_dash(db, _dash_config(), started=time.monotonic(), meter=None, client=client, now=utcnow())
+    for call in client.put_object.call_args_list:
+        if call.kwargs["Key"] == release_object_key("npm", name, "2.0.0"):
+            return json.loads(call.kwargs["Body"])
+    raise AssertionError(f"no release object uploaded for {name}")
+
+
+def _all_keys(value):
+    if isinstance(value, dict):
+        for key, item in value.items():
+            yield key
+            yield from _all_keys(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _all_keys(item)
+
+
+def test_published_release_object_keeps_public_fields(db):
+    body = _published_release(db, "<b>demo-html</b>")
+    summary = body["release"]
+    for key in ("band", "p", "signals", "created_at"):
+        assert key in summary
+    assert [(hit["rule"], hit["tier"], hit["path"]) for hit in summary["rule_hits"]] == [
+        ("net_oast_host", "strong", "package.json")
+    ]
+    assert body["triage"]["verdict"] == "malicious"
+    assert body["analyst"]["verdict"] == "malicious"
+
+
+@pytest.mark.xfail(
+    reason="H4: release objects still publish rule_hits[].matched, triage/analyst report and scout_model_id; "
+    "whether to drop them is an open product decision",
+    strict=False,
+)
+def test_published_release_object_omits_snippets_reports_and_model_id(db):
+    body = _published_release(db, "<b>demo-html</b>")
+    assert not {"matched", "report", "scout_model_id"} & set(_all_keys(body))
+
+
 def test_put_feed_object_refuses_unknown_keys():
     client = MagicMock()
     with pytest.raises(ValueError, match="non-public"):
