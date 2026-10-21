@@ -21,7 +21,8 @@ Signals:
 - ``burst_publish``: many versions published inside a short window.
 
 A metadata read that fails leaves its signal out. An unknown is never a
-signal.
+signal. A transient failure (timeout, 5xx) is scored again later, up to
+MAX_ATTEMPTS times; a 404 or an oversized document is final.
 """
 
 from __future__ import annotations
@@ -30,14 +31,17 @@ import base64
 import json
 import logging
 import re
+import threading
 import urllib.error
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
 from hunter.registry import (
+    DownloadTooLarge,
     FeedError,
     HttpGet,
+    _accepts_keyword,
     http_get,
     parse_time,
     predecessor_version,
@@ -47,6 +51,16 @@ from hunter.registry import (
 log = logging.getLogger("hunter.takeover")
 
 ECOSYSTEMS = ("pypi", "npm")
+
+# Response caps. A packument or project document for a big package runs to
+# tens of MB; the per-release documents are small.
+DOCUMENT_MAX_BYTES = 32 * 1024 * 1024
+SMALL_MAX_BYTES = 4 * 1024 * 1024
+# PyPI provenance files checked per release, sdist first.
+PROVENANCE_FILES = 2
+# Scoring attempts per release when reads fail transiently, and the wait between them.
+MAX_ATTEMPTS = 3
+RETRY_DELAY = timedelta(hours=1)
 
 WEIGHTS: dict[str, int] = {
     "provenance_lost": 40,
@@ -69,10 +83,16 @@ class TakeoverSignals:
     signals: list[str] = field(default_factory=list)
     detail: dict = field(default_factory=dict)
     error: str = ""
+    transient: bool = False
 
     @property
     def score(self) -> int:
         return sum(WEIGHTS.get(item, 0) for item in self.signals)
+
+    def fail(self, where: str, exc: BaseException) -> None:
+        self.error = "; ".join(item for item in (self.error, f"{where}: {exc}") if item)
+        if _transient(exc):
+            self.transient = True
 
     def add(self, signal: str, **detail) -> None:
         if signal not in self.signals:
@@ -111,14 +131,26 @@ def _not_found(exc: BaseException) -> bool:
     return False
 
 
-def _get_json(transport: HttpGet, url: str, timeout: float = 30.0) -> dict:
+def _transient(exc: BaseException) -> bool:
+    """A read worth trying again: not a 404 and not a document over the cap."""
+    return isinstance(exc, FeedError) and not isinstance(exc, DownloadTooLarge)
+
+
+def _get_json(transport: HttpGet, url: str, timeout: float = 30.0, max_bytes: int = SMALL_MAX_BYTES) -> dict:
     """JSON object at `url`. A 404 raises _Missing; any other failure raises FeedError."""
     try:
-        blob = transport(url, timeout)
+        if _accepts_keyword(transport, "max_bytes"):
+            blob = transport(url, timeout, max_bytes=max_bytes)
+        else:
+            blob = transport(url, timeout)
+    except DownloadTooLarge:
+        raise
     except Exception as exc:
         if _not_found(exc):
             raise _Missing(url) from None
         raise FeedError(str(exc)) from exc
+    if len(blob) > max_bytes:
+        raise DownloadTooLarge(f"{url} is over {max_bytes} bytes")
     try:
         data = json.loads(bytes(blob).decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as exc:
@@ -284,7 +316,7 @@ def npm_signals(
             elif old_identity and new_identity and old_identity != new_identity:
                 out.add("provenance_identity_changed", old=old_identity, new=new_identity)
     except FeedError as exc:
-        out.error = f"provenance: {exc}"
+        out.fail("provenance", exc)
     return out
 
 
@@ -336,12 +368,20 @@ def _integrity_base(pypi_base: str) -> str:
     return f"{base}/integrity"
 
 
-def _pypi_provenance(transport: HttpGet, pypi_base: str, name: str, version: str, files: list) -> str | None:
-    """Publisher identity when any file of the release has provenance, None when none do."""
+def _provenance_candidates(files: list) -> list[str]:
+    """At most PROVENANCE_FILES file names, sdist first. Trusted publishing attests every file."""
+    names = []
     for item in files or []:
-        filename = str((item or {}).get("filename") or "") if isinstance(item, dict) else ""
-        if not filename:
-            continue
+        filename = str(item.get("filename") or "") if isinstance(item, dict) else ""
+        if filename:
+            sdist = item.get("packagetype") == "sdist" or filename.endswith((".tar.gz", ".zip"))
+            names.append((0 if sdist else 1, filename))
+    return [filename for _rank, filename in sorted(names, key=lambda pair: pair[0])[:PROVENANCE_FILES]]
+
+
+def _pypi_provenance(transport: HttpGet, pypi_base: str, name: str, version: str, files: list) -> str | None:
+    """Publisher identity when a checked file of the release has provenance, None when none do."""
+    for filename in _provenance_candidates(files):
         url = f"{_integrity_base(pypi_base)}/{quote(name)}/{quote(version)}/{quote(filename)}/provenance"
         try:
             document = _get_json(transport, url)
@@ -391,7 +431,7 @@ def pypi_signals(
         if old_emails and new_emails and not old_emails & new_emails:
             out.add("publisher_email_changed", old=sorted(old_emails), new=sorted(new_emails))
     except (FeedError, _Missing) as exc:
-        out.error = f"metadata: {exc}"
+        out.fail("metadata", exc)
 
     try:
         old_identity = _pypi_provenance(transport, pypi_base, name, old, old_files)
@@ -402,7 +442,7 @@ def pypi_signals(
             elif old_identity and new_identity and old_identity != new_identity:
                 out.add("provenance_identity_changed", old=old_identity, new=new_identity)
     except FeedError as exc:
-        out.error = "; ".join(item for item in (out.error, f"provenance: {exc}") if item)
+        out.fail("provenance", exc)
     return out
 
 
@@ -413,7 +453,9 @@ def release_signals(db, config, ecosystem: str, name: str, version: str, transpo
     thresholds = Thresholds.from_config(config)
     try:
         if ecosystem == "npm":
-            document = _get_json(transport, f"{config.npm_registry.rstrip('/')}/{quote(name, safe='@')}")
+            document = _get_json(
+                transport, f"{config.npm_registry.rstrip('/')}/{quote(name, safe='@')}", max_bytes=DOCUMENT_MAX_BYTES
+            )
             return npm_signals(
                 document,
                 name,
@@ -422,7 +464,9 @@ def release_signals(db, config, ecosystem: str, name: str, version: str, transpo
                 registry=config.npm_registry,
                 thresholds=thresholds,
             )
-        document = _get_json(transport, f"{config.pypi_base.rstrip('/')}/{quote(name)}/json")
+        document = _get_json(
+            transport, f"{config.pypi_base.rstrip('/')}/{quote(name)}/json", max_bytes=DOCUMENT_MAX_BYTES
+        )
         previous = db.last_takeover_owners(ecosystem, name, exclude_version=version)
         return pypi_signals(
             document,
@@ -434,20 +478,39 @@ def release_signals(db, config, ecosystem: str, name: str, version: str, transpo
             thresholds=thresholds,
         )
     except (FeedError, _Missing) as exc:
-        return TakeoverSignals(ecosystem, name, version, error=f"metadata: {exc}")
+        out = TakeoverSignals(ecosystem, name, version)
+        out.fail("metadata", exc)
+        return out
 
 
-def score_pending_jobs(db, config, transport: HttpGet = http_get, limit: int | None = None) -> int:
-    """Record signals for pending npm and PyPI jobs that have none yet. Returns how many were scored."""
+def score_pending_jobs(
+    db,
+    config,
+    transport: HttpGet = http_get,
+    limit: int | None = None,
+    stop: threading.Event | None = None,
+) -> int:
+    """Record signals for pending npm and PyPI jobs, newest first. Returns how many were scored.
+
+    A job is picked when it has no signals yet, or when its last read failed
+    transiently and its retry time has come.
+    """
     batch = config.takeover_batch if limit is None else limit
     jobs = db.unscored_pending_jobs(ECOSYSTEMS, limit=max(0, batch))
+    scored = 0
     for job in jobs:
+        if stop is not None and stop.is_set():
+            break
+        scored += 1
         ecosystem, name, version = str(job["ecosystem"]), str(job["name"]), str(job["version"])
         try:
             found = release_signals(db, config, ecosystem, name, version, transport)
         except Exception as exc:  # one bad document must not stop the queue
             log.exception("takeover signals failed %s %s %s", ecosystem, name, version)
             found = TakeoverSignals(ecosystem, name, version, error=str(exc) or type(exc).__name__)
+        retry_at = None
+        if found.transient and int(job["attempts"] or 0) + 1 < MAX_ATTEMPTS:
+            retry_at = datetime.now(timezone.utc) + RETRY_DELAY
         db.save_takeover_signals(
             ecosystem,
             name,
@@ -457,6 +520,7 @@ def score_pending_jobs(db, config, transport: HttpGet = http_get, limit: int | N
             found.detail,
             old_version=found.old_version,
             error=found.error,
+            retry_at=retry_at,
         )
         if found.signals:
             log.info(
@@ -468,4 +532,4 @@ def score_pending_jobs(db, config, transport: HttpGet = http_get, limit: int | N
                 found.score,
                 ",".join(found.signals),
             )
-    return len(jobs)
+    return scored

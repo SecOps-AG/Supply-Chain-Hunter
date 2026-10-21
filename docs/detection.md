@@ -27,7 +27,7 @@ Optional (`HUNTER_TAKEOVER_SIGNALS`, off by default). Before Scout reads a relea
 | `semver_jump` | 10 | The major version moved by `HUNTER_TAKEOVER_MAJOR_JUMP` or more. |
 | `burst_publish` | 10 | `HUNTER_TAKEOVER_BURST_COUNT` or more versions inside `HUNTER_TAKEOVER_BURST_HOURS`. |
 
-When a metadata read fails, Hunter leaves that signal out and stores the error. An unknown is never counted as a loss.
+When a metadata read fails, Hunter leaves that signal out and stores the error. An unknown is never counted as a loss. A transient failure (timeout, server error) is scored again an hour later, up to three tries; a 404 is final. Each document read is size-capped (32 MB for the npm packument or PyPI project document, 4 MB for the others), and PyPI provenance is checked on at most two files per release, sdist first.
 
 ## MCP tool and server.json signals
 

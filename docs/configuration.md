@@ -238,7 +238,7 @@ Off by default. With `HUNTER_TAKEOVER_SIGNALS=on`, Hunter reads registry metadat
 | Variable | Default | What it does |
 | --- | --- | --- |
 | `HUNTER_TAKEOVER_SIGNALS` | off | `on` records the signals and orders the classify queue by them. |
-| `HUNTER_TAKEOVER_BATCH` | `50` | Most pending releases scored per classify round. |
+| `HUNTER_TAKEOVER_BATCH` | `50` | Most pending releases scored per pass, newest first. `hunter serve` scores on its own thread, so registry reads never hold up classify. |
 | `HUNTER_TAKEOVER_DORMANT_DAYS` | `365` | Days without a release before a new one counts as a dormant publish. `0` turns it off. |
 | `HUNTER_TAKEOVER_MAJOR_JUMP` | `2` | Major-version step that counts as a semver jump. `0` turns it off. |
 | `HUNTER_TAKEOVER_BURST_COUNT` | `5` | Versions inside the burst window that count as burst publishing. `0` turns it off. |

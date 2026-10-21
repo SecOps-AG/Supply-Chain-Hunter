@@ -323,6 +323,8 @@ class Database:
                 detail_json TEXT NOT NULL,
                 error TEXT,
                 created_at TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 1,
+                retry_at TEXT,
                 PRIMARY KEY (ecosystem, name, version)
             );
             CREATE TABLE IF NOT EXISTS mcp_risk (
@@ -344,6 +346,11 @@ class Database:
         if "scored_at" not in columns:
             # When the band last changed; created_at stays the first save.
             self._conn.execute("ALTER TABLE releases ADD COLUMN scored_at TEXT")
+        columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(takeover_signals)")}
+        if "attempts" not in columns:
+            self._conn.execute("ALTER TABLE takeover_signals ADD COLUMN attempts INTEGER NOT NULL DEFAULT 1")
+        if "retry_at" not in columns:
+            self._conn.execute("ALTER TABLE takeover_signals ADD COLUMN retry_at TEXT")
         self._conn.commit()
         version = int(self._conn.execute("PRAGMA user_version").fetchone()[0])
         for step, script in enumerate(MIGRATIONS[version:], start=version + 1):
@@ -712,22 +719,29 @@ class Database:
             ).fetchall()
         return list(rows)
 
-    def unscored_pending_jobs(self, ecosystems: tuple[str, ...], limit: int = 50) -> list[sqlite3.Row]:
-        """Pending jobs with no takeover-signal row yet, in queue order."""
+    def unscored_pending_jobs(
+        self, ecosystems: tuple[str, ...], limit: int = 50, now: datetime | None = None
+    ) -> list[sqlite3.Row]:
+        """Pending jobs with no takeover-signal row yet or a retry that is due, newest first.
+
+        Under a backlog the newest releases, the likely live attacks, are scored first.
+        """
         if not ecosystems or limit <= 0:
             return []
         marks = ",".join("?" for _ in ecosystems)
         with self._lock:
             rows = self._conn.execute(
                 f"""
-                SELECT j.ecosystem, j.name, j.version, j.rank FROM release_jobs AS j
+                SELECT j.ecosystem, j.name, j.version, j.rank, COALESCE(t.attempts, 0) AS attempts
+                FROM release_jobs AS j
                 LEFT JOIN takeover_signals AS t
                     ON t.ecosystem = j.ecosystem AND t.name = j.name AND t.version = j.version
-                WHERE j.status = 'pending' AND t.name IS NULL AND j.ecosystem IN ({marks})
-                ORDER BY j.created_at, j.ecosystem, j.name, j.version
+                WHERE j.status = 'pending' AND j.ecosystem IN ({marks})
+                    AND (t.name IS NULL OR (t.retry_at IS NOT NULL AND t.retry_at <= ?))
+                ORDER BY j.created_at DESC, j.ecosystem, j.name, j.version
                 LIMIT ?
                 """,
-                (*ecosystems, limit),
+                (*ecosystems, iso(now or utcnow()), limit),
             ).fetchall()
         return list(rows)
 
@@ -743,21 +757,26 @@ class Database:
         old_version: str | None = None,
         error: str = "",
         when: datetime | None = None,
+        retry_at: datetime | None = None,
     ) -> None:
+        """`retry_at` marks a transient read failure to score again; each save counts an attempt."""
         moment = iso(when or utcnow())
         with self._lock:
             self._conn.execute(
                 """
                 INSERT INTO takeover_signals (
-                    ecosystem, name, version, old_version, score, signals_json, detail_json, error, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ecosystem, name, version, old_version, score, signals_json, detail_json, error, created_at,
+                    attempts, retry_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
                 ON CONFLICT(ecosystem, name, version) DO UPDATE SET
                     old_version = excluded.old_version,
                     score = excluded.score,
                     signals_json = excluded.signals_json,
                     detail_json = excluded.detail_json,
                     error = excluded.error,
-                    created_at = excluded.created_at
+                    created_at = excluded.created_at,
+                    attempts = takeover_signals.attempts + 1,
+                    retry_at = excluded.retry_at
                 """,
                 (
                     ecosystem,
@@ -769,6 +788,7 @@ class Database:
                     json.dumps(detail, sort_keys=True, default=str),
                     error or None,
                     moment,
+                    iso(retry_at) if retry_at is not None else None,
                 ),
             )
             self._conn.commit()
