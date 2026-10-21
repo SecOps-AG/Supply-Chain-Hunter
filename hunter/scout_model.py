@@ -1,7 +1,9 @@
 """Decision model (Scout) setting and the answer shape every Scout model returns.
 
-Scout stays on Jev or Clef. Those models return per-question probabilities for
-a fitted scoring file. An OpenRouter chat model is not a Scout backend.
+Scout runs on Jev, Clef, or Luna (GPT-6 Luna Decisions through OpenRouter's
+decisions endpoint, experimental). Those models return per-question
+probabilities for a fitted scoring file. An OpenRouter chat model is not a
+Scout backend.
 """
 
 from __future__ import annotations
@@ -10,7 +12,9 @@ import copy
 import os
 from dataclasses import dataclass, field
 
-SCOUT_MODELS = ("jev", "clef")
+SCOUT_MODELS = ("jev", "clef", "luna")
+# Accepted spellings for the Luna decision model.
+SCOUT_MODEL_ALIASES = {"openrouter-decisions": "luna"}
 DEFAULT_SCOUT_MODEL = "jev"
 
 
@@ -106,17 +110,21 @@ def usage_from(raw: object) -> Usage:
 def scout_model_from_env(raw: str | None = None) -> str:
     """The decision model (Scout). An unknown name stops startup.
 
-    Jev and Clef are the only providers. OpenRouter model ids go on
+    The providers are jev, clef and luna (alias openrouter-decisions). Luna is
+    GPT-6 Luna Decisions on OpenRouter's decisions endpoint; its model id is set
+    with HUNTER_LUNA_MODEL. Any other OpenRouter model id goes on
     HUNTER_SMART_MODEL (mid-tier, balanced model) and HUNTER_ANALYST_MODEL
     (Frontier model).
     """
     value = os.environ.get("HUNTER_SCOUT_MODEL", "") if raw is None else raw
     name = value.strip().lower() or DEFAULT_SCOUT_MODEL
+    name = SCOUT_MODEL_ALIASES.get(name, name)
     if name not in SCOUT_MODELS:
         raise ValueError(
-            f"HUNTER_SCOUT_MODEL={value.strip()!r} is not supported; use one of: {', '.join(SCOUT_MODELS)}. "
-            "The decision model (Scout) stays on Jev or Clef. "
-            "Any OpenRouter model id belongs in HUNTER_SMART_MODEL "
+            f"HUNTER_SCOUT_MODEL={value.strip()!r} is not supported; use one of: "
+            f"{', '.join(SCOUT_MODELS)} (or openrouter-decisions for luna). "
+            "The decision model (Scout) runs on Jev, Clef, or Luna (OpenRouter decisions). "
+            "Any other OpenRouter model id belongs in HUNTER_SMART_MODEL "
             "(mid-tier, balanced model) or HUNTER_ANALYST_MODEL (Frontier model)."
         )
     return name
@@ -128,6 +136,7 @@ def scout_backup_from_env(primary: str, raw: str | None = None) -> str:
     name = value.strip().lower()
     if not name or name in ("off", "none"):
         return ""
+    name = SCOUT_MODEL_ALIASES.get(name, name)
     if name not in SCOUT_MODELS:
         raise ValueError(f"HUNTER_SCOUT_FALLBACK={value.strip()!r} is not supported; use one of: {', '.join(SCOUT_MODELS)}")
     return "" if name == primary else name
@@ -148,6 +157,10 @@ def make_scout_model(config, *, meter=None, with_backup: bool = True):
         from hunter.clef import ClefClient
 
         client = ClefClient(model=getattr(config, "clef_model", None))
+    elif name == "luna":
+        from hunter.luna import LunaClient
+
+        client = LunaClient(model=getattr(config, "luna_model", None))
     else:
         raise ValueError(f"no client for Scout model {name}")
     client.meter = meter
@@ -195,6 +208,10 @@ def head_name_for(config) -> str:
         from hunter.clef import clef_head_name, resolve_clef_model
 
         return clef_head_name(resolve_clef_model(getattr(config, "clef_model", None)))
+    if name == "luna":
+        from hunter.luna import luna_head_name
+
+        return luna_head_name()
     return name
 
 

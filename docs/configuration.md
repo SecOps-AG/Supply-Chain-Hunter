@@ -4,7 +4,7 @@ Hunter is configured with environment variables. On a server, put them in `/etc/
 
 ## Decision model (Scout)
 
-Jev is the default and uses its own API. Clef is the other decision-model provider and uses the Cloudflare API. OpenRouter is not used for either.
+Jev is the default and uses its own API. Clef uses the Cloudflare API. Luna (GPT-6 Luna Decisions, experimental) uses OpenRouter's decisions endpoint; it is the only OpenRouter model the decision model accepts.
 
 | Variable | Default | What it does |
 | --- | --- | --- |
@@ -18,12 +18,12 @@ Jev is the default and uses its own API. Clef is the other decision-model provid
 | `HUNTER_SCOUT_DAILY_USD_CAP` | off | Daily Scout spend cap, by Pacific day. When reached, Scout stops and releases wait in the queue. It does **not** restart at midnight: change the value and restart Hunter. |
 | `HUNTER_JEV_USD_PER_M_INPUT` | `0.042` | Jev price per million input tokens, used for the spend count. |
 | `HUNTER_FILE_READ_BYTES` | `8388608` (8 MiB) | Most bytes read from one file. Longer files are cut and the release is marked as partly read. |
-| `HUNTER_SCOUT_MODEL` | `jev` | Decision model provider: `jev` or `clef`. Clef is experimental; see [detection.md](detection.md#clef-experimental). An OpenRouter model id is rejected here. |
-| `HUNTER_SCOUT_FALLBACK` | off | Backup decision model: `jev` or `clef` (it needs its own scoring-layer file). When the main decision model cannot answer for a release, the whole release is read again on the backup and gets the `backup_decision_model` signal. A spend-cap stop does not use the backup. If neither model answers, the release waits as `deferred` with the `decision_model_down` signal, and exactly one webhook is sent per outage once it has lasted 10 minutes or failed 5 releases. That webhook has counts only, never package names. The outage is kept in the database, so a restart does not send it again, and it ends when a model answers. |
+| `HUNTER_SCOUT_MODEL` | `jev` | Decision model provider: `jev`, `clef`, or `luna` (`openrouter-decisions` is accepted as another name for `luna`). Clef and Luna are experimental; see [detection.md](detection.md#clef-experimental). Any other OpenRouter model id is rejected here; set the Luna model with `HUNTER_LUNA_MODEL`. |
+| `HUNTER_SCOUT_FALLBACK` | off | Backup decision model: `jev`, `clef`, or `luna` (it needs its own scoring-layer file). When the main decision model cannot answer for a release, the whole release is read again on the backup and gets the `backup_decision_model` signal. A spend-cap stop does not use the backup. If neither model answers, the release waits as `deferred` with the `decision_model_down` signal, and exactly one webhook is sent per outage once it has lasted 10 minutes or failed 5 releases. That webhook has counts only, never package names. The outage is kept in the database, so a restart does not send it again, and it ends when a model answers. |
 
 ## Mid-tier, balanced model (Triage) and Frontier model (Analyst)
 
-The default backend is `cursor`. OpenRouter is optional: set `HUNTER_SMART_BACKEND=openrouter` or `HUNTER_ANALYST_BACKEND=openrouter` to use it for that role. A key named `OpenRouter` does not switch the backend. The decision model does not use these variables. Jev uses its own API. Clef uses the Cloudflare API.
+The default backend is `cursor`. OpenRouter is optional: set `HUNTER_SMART_BACKEND=openrouter` or `HUNTER_ANALYST_BACKEND=openrouter` to use it for that role. A key named `OpenRouter` does not switch the backend. The decision model does not use these variables. Jev uses its own API. Clef uses the Cloudflare API. Luna uses the shared OpenRouter key below (or `HUNTER_LUNA_API_KEY`).
 
 | Variable | Default | What it does |
 | --- | --- | --- |
@@ -240,6 +240,20 @@ These only matter with `HUNTER_SCOUT_MODEL=clef`. Clef uses `hunter/logistic_hea
 | `HUNTER_CLEF_RETRIES` | `5` | Attempts per call. |
 | `HUNTER_CLEF_RELEASE_TOKENS` / `HUNTER_CLEF_RELEASE_USD` | off | Per-release token and dollar caps. A release over either goes to review. Set one when you run hosted Clef. The calibration used 150000 tokens. |
 | `HUNTER_CLEF_USD_PER_M_INPUT` / `HUNTER_CLEF_FLASH_USD_PER_M_INPUT` | `0.24` / `0.09` | Prices for the spend count. |
+
+### Luna (experimental)
+
+These only matter with `HUNTER_SCOUT_MODEL=luna`. Luna asks Jev's questions through OpenRouter's decisions endpoint and gets the same kind of probabilities back. It packs each release the same way as Jev and uses the same per-release token cap (`HUNTER_SCOUT_RELEASE_TOKENS`). It uses `hunter/logistic_head_luna.json` when that file exists, and Jev's scoring file otherwise.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `HUNTER_LUNA_MODEL` | `openai/gpt-6-luna-decisions` | OpenRouter decisions model id. Names with a `fast` part are refused. |
+| `HUNTER_LUNA_BASE_URL` | `https://openrouter.ai/api/alpha` | Base URL; requests go to `{base}/decisions`. |
+| `HUNTER_LUNA_API_KEY` | the shared OpenRouter key | Key for Luna only. Never commit it. |
+| `HUNTER_LUNA_RETRIES` | `5` | Sends per piece, including retries after 429 and 5xx. |
+| `HUNTER_LUNA_MAX_RPM` | `240` | Requests per minute. |
+| `HUNTER_LUNA_USD_PER_M_INPUT` | `0.10` | Price used by the spend meter. |
+
 
 ## Deterministic rules
 

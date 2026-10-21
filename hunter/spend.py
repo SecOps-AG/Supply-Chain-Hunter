@@ -28,6 +28,7 @@ DEFAULT_USD_PER_M_INPUT = {
     "clef-flash": 0.038,
     "clef-omni": 0.15,
     "microsoft-decision-1": 0.042,
+    "luna": 0.10,
 }
 PRICE_ENV = {
     "jev": "HUNTER_JEV_USD_PER_M_INPUT",
@@ -35,6 +36,7 @@ PRICE_ENV = {
     "clef-flash": "HUNTER_CLEF_FLASH_USD_PER_M_INPUT",
     "clef-omni": "HUNTER_CLEF_OMNI_USD_PER_M_INPUT",
     "microsoft-decision-1": "HUNTER_MICROSOFT_DECISION_USD_PER_M_INPUT",
+    "luna": "HUNTER_LUNA_USD_PER_M_INPUT",
 }
 STOP_REASON = "spend_cap_reached"
 
