@@ -23,6 +23,10 @@ from hunter.actions.github import GitHubClient, RateLimited
 from hunter.actions.poller import poll_actions
 from hunter.actions.review import MODEL_ID as ACTIONS_RULES_MODEL, classify_action
 from hunter.actions.watchlist import refresh_actions_watchlist
+from hunter.mcp_registry import POLL_NAME as MCP_POLL_NAME, poll_mcp_registry
+from hunter.openvsx import ECOSYSTEM as OPENVSX_ECOSYSTEM
+from hunter.openvsx.feed import poll_openvsx
+from hunter.openvsx.review import classify_extension
 from hunter.archives import (
     ArchiveError,
     DiskTree,
@@ -333,6 +337,36 @@ def classify_action_job(
     transport: HttpGet = http_get,
 ) -> None:
     """One GitHub Actions tag event: signals, rules, and Triage when the signals or rules ask for it."""
+    client = getattr(loader, "github", None) or GitHubClient(config.github_token)
+
+    def _review():
+        return classify_action(db, config, job, client=client, transport=transport, jev=jev)
+
+    _classify_reviewed_job(db, config, job, review=_review)
+
+
+def classify_openvsx_job(
+    db: Database,
+    config: Config,
+    job,
+    *,
+    jev,
+    loader: ReleaseLoader,
+    transport: HttpGet = http_get,
+) -> None:
+    """One Open VSX extension release: rules first, Scout on rule hits when allowed, then Triage routing."""
+
+    def _review():
+        return classify_extension(db, config, job, transport=transport, jev=jev)
+
+    _classify_reviewed_job(db, config, job, review=_review)
+
+
+def _classify_reviewed_job(db: Database, config: Config, job, *, review) -> None:
+    """Save the row a deterministic review returns, then queue Triage when it asks for it.
+
+    ``review`` returns (result, old_files, new_files, meta), as ``classify_action`` does.
+    """
     ecosystem = str(job["ecosystem"])
     name = str(job["name"])
     version = str(job["version"])
@@ -342,7 +376,6 @@ def classify_action_job(
         db.finish_job(ecosystem, name, version)
         db.clear_classify_retry(ecosystem, name, version)
         return
-    client = getattr(loader, "github", None) or GitHubClient(config.github_token)
     excerpt = ""
     manifest = ""
     full_diff = ""
@@ -350,9 +383,7 @@ def classify_action_job(
     new_files = None
     try:
         try:
-            result, old_files, new_files, meta = classify_action(
-                db, config, job, client=client, transport=transport, jev=jev
-            )
+            result, old_files, new_files, meta = review()
             if result.needs_llm_review and new_files is not None:
                 excerpt, manifest, full_diff = triage_evidence_parts(old_files, new_files, meta)
         except RateLimited as exc:
@@ -415,6 +446,9 @@ def classify_job(db: Database, config: Config, job, *, jev, loader: ReleaseLoade
     ecosystem = str(job["ecosystem"])
     if ecosystem == ACTIONS_ECOSYSTEM:
         classify_action_job(db, config, job, jev=jev, loader=loader, transport=transport)
+        return
+    if ecosystem == OPENVSX_ECOSYSTEM:
+        classify_openvsx_job(db, config, job, jev=jev, loader=loader, transport=transport)
         return
     name = str(job["name"])
     version = str(job["version"])
@@ -620,7 +654,7 @@ def _queue_npm_versions(
     return queued, "ok"
 
 
-def poll_pypi(db: Database, feed: PypiSerialFeed, *, max_pending: int | None = None) -> int:
+def poll_pypi(db: Database, feed: PypiSerialFeed, *, max_pending: int | None = None, include_mcp: bool = False) -> int:
     saved = db.get_checkpoint("pypi")
     if saved is None:
         db.set_checkpoint("pypi", str(feed.last_serial()))
@@ -628,9 +662,10 @@ def poll_pypi(db: Database, feed: PypiSerialFeed, *, max_pending: int | None = N
         return 0
     events = list(feed.since(int(saved)))
     watch = db.watch_names("pypi")
+    targets = db.poll_watch("pypi") if include_mcp else watch
     queued = 0
     blocked = False
-    for name, version, rank in pypi_events_to_versions(events, watch):
+    for name, version, rank in pypi_events_to_versions(events, targets):
         state = _release_stored(db, "pypi", name, version, rank, max_pending)
         if state == "queued":
             queued += 1
@@ -671,8 +706,10 @@ def poll_npm(db: Database, config: Config, transport: HttpGet = http_get, stop: 
         bootstrap_npm(db, config.npm_changes, transport)
         db.mark_poll_success("npm")
         return 0
-    watch = db.watch_names("npm")
-    popular = {str(name).lower(): int(rank) for name, rank in watch.items()}
+    ranked = db.watch_names("npm")
+    # MCP packages are watched for releases but are not popular names for the typosquat check.
+    watch = db.poll_watch("npm") if getattr(config, "mcp_registry", False) else ranked
+    popular = {str(name).lower(): int(rank) for name, rank in ranked.items()}
     name_index = NameIndex(popular)
     queued = 0
     typo_left = TYPOSQUAT_QUEUE_LIMIT
@@ -1119,7 +1156,7 @@ def _poll_pypi_safely(db: Database, config: Config, feed, transport: HttpGet) ->
         return
     _refresh_watchlists_if_stale(db, config, transport)
     try:
-        poll_pypi(db, feed, max_pending=config.max_pending)
+        poll_pypi(db, feed, max_pending=config.max_pending, include_mcp=getattr(config, "mcp_registry", False))
     except Exception as exc:
         db.mark_poll_error("pypi", str(exc))
         log.warning("pypi poll failed: %s", exc)
@@ -1177,6 +1214,22 @@ def _ground_truth_safely(
         run_ground_truth(db, config, transport=transport, stop=stop)
     except Exception as exc:
         log.warning("ground truth run failed: %s", exc)
+
+
+def _poll_mcp_registry_safely(db: Database, config: Config, transport: HttpGet, stop: threading.Event | None) -> None:
+    try:
+        poll_mcp_registry(db, config, transport, stop)
+    except Exception as exc:
+        db.mark_poll_error(MCP_POLL_NAME, str(exc))
+        log.warning("MCP registry poll failed: %s", exc)
+
+
+def _poll_openvsx_safely(db: Database, config: Config, transport: HttpGet, stop: threading.Event | None) -> None:
+    try:
+        poll_openvsx(db, config, transport, stop)
+    except Exception as exc:
+        db.mark_poll_error(OPENVSX_ECOSYSTEM, str(exc))
+        log.warning("Open VSX poll failed: %s", exc)
 
 
 def _feed_loop(stop: threading.Event, interval: float, fn) -> None:
@@ -1269,6 +1322,10 @@ def health_payload(
     payload["dash_last_error"] = None if dash_state is None else dash_state["last_error"]
     if config is not None and config.actions:
         payload["github_actions"] = {**db.action_counts(), "token": bool(config.github_token)}
+    if config is not None and getattr(config, "mcp_registry", False):
+        payload["mcp_registry"] = db.mcp_counts()
+    if config is not None and getattr(config, "openvsx", False):
+        payload["openvsx"] = db.openvsx_counts()
     if meter is not None:
         payload.update(meter.health())
     return payload
@@ -1485,6 +1542,34 @@ def serve(
                         "fn": lambda: _ground_truth_safely(db, config, transport, stop),
                     },
                     name="hunter-ground-truth",
+                    daemon=True,
+                )
+            )
+        if config.mcp_registry:
+            if config.skip_pypi and config.skip_npm:
+                log.warning("MCP registry is on but npm and PyPI are both skipped; its packages are not polled")
+            polls.append(
+                threading.Thread(
+                    target=_feed_loop,
+                    kwargs={
+                        "stop": stop,
+                        "interval": config.mcp_poll_interval,
+                        "fn": lambda: _poll_mcp_registry_safely(db, config, transport, stop),
+                    },
+                    name="hunter-mcp-registry",
+                    daemon=True,
+                )
+            )
+        if config.openvsx:
+            polls.append(
+                threading.Thread(
+                    target=_feed_loop,
+                    kwargs={
+                        "stop": stop,
+                        "interval": config.openvsx_poll_interval,
+                        "fn": lambda: _poll_openvsx_safely(db, config, transport, stop),
+                    },
+                    name="hunter-openvsx",
                     daemon=True,
                 )
             )

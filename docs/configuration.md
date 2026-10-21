@@ -167,6 +167,32 @@ How releases are labeled:
 
 The summary has `malicious_seen`, `caught`, `missed`, `recall`, `confirmed`, `confirmed_recall`, time-to-detect stats (count, median, p90, mean, min, max), and the same counts per ecosystem and per source.
 
+## MCP registry
+
+Off by default. When on, Hunter polls the official MCP server registry (`/v0.1/servers?updated_since=...`, following `metadata.nextCursor`) about once an hour. The first poll reads the whole registry. Each server entry's npm and PyPI packages join the npm and PyPI watch whatever their download rank, so their new releases go through the usual rules, Scout, Triage and Analyst. Docker/OCI images, `.mcpb` bundles, remote-only servers and packages hosted on other registries are skipped. Names are kept after a ranked watchlist refresh and are never removed. They are not counted as popular names in the typosquat check.
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `HUNTER_MCP_REGISTRY` | off | `on` adds MCP server packages to the npm and PyPI watch. |
+| `HUNTER_MCP_REGISTRY_URL` | `https://registry.modelcontextprotocol.io` | Registry origin. |
+| `HUNTER_MCP_POLL_INTERVAL` | `3600` | Seconds between polls (at least 300). |
+
+Localhost `/health` adds an `mcp_registry` block with the number of npm and PyPI names it added.
+
+## Open VSX
+
+Off by default. When on, Hunter reads the Open VSX changes feed (`/api/-/version-changes`) and diffs each new extension version's `.vsix` against the previous version of the same build (universal first, else one platform build). The first poll starts the feed at the current time. The npm rules read every release, plus checks on `extension/package.json`: a new `extensionPack` or `extensionDependencies` entry, eager activation (`*` or `onStartupFinished`), a changed `main` or `browser` entry, and a different publisher. A malicious rule verdict, two of those checks, or one with a rule hit sends the release to Triage; everything else is stored without a model call. Removals in the feed (`state: REMOVED`) are recorded with their extension and version as ground truth.
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `HUNTER_OPENVSX` | off | `on` watches Open VSX releases. |
+| `HUNTER_OPENVSX_URL` | `https://open-vsx.org` | Registry origin. |
+| `HUNTER_OPENVSX_POLL_INTERVAL` | `300` | Seconds between feed polls (at least 60). |
+| `HUNTER_OPENVSX_PAGE_SIZE` | `200` | Changes per feed page (at most 1000). |
+| `HUNTER_OPENVSX_SCOUT` | off | `on` lets Scout read an Open VSX release, only when a rule hit. |
+
+Localhost `/health` adds an `openvsx` block with recorded active, removed and other versions. `HUNTER_MAX_PENDING` applies: a full queue pauses the feed at that page.
+
 ## Performance and storage
 
 | Variable | Default | What it does |

@@ -252,6 +252,26 @@ class Database:
                 day TEXT PRIMARY KEY,
                 used INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS mcp_packages (
+                ecosystem TEXT NOT NULL,
+                name TEXT NOT NULL,
+                server TEXT NOT NULL,
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                PRIMARY KEY (ecosystem, name)
+            );
+            CREATE TABLE IF NOT EXISTS openvsx_changes (
+                name TEXT NOT NULL,
+                version TEXT NOT NULL,
+                platform TEXT NOT NULL,
+                state TEXT NOT NULL,
+                published_at TEXT,
+                changed_at TEXT,
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                PRIMARY KEY (name, version, platform)
+            );
+            CREATE INDEX IF NOT EXISTS openvsx_changes_state ON openvsx_changes (state, last_seen_at);
             """
         )
         self._conn.commit()
@@ -498,8 +518,9 @@ class Database:
             ).fetchall()
         found = {str(row["ecosystem"]): row["last_success_at"] for row in rows}
         polls = {"pypi": found.get("pypi"), "npm": found.get("npm")}
-        if "github-actions" in found:
-            polls["github-actions"] = found["github-actions"]
+        for extra in ("github-actions", "mcp", "openvsx"):
+            if extra in found:
+                polls[extra] = found[extra]
         return polls
 
     def pending_count(self) -> int:
@@ -1858,3 +1879,122 @@ class Database:
             )
             self._conn.commit()
         return True
+
+    def add_mcp_packages(self, rows: list[tuple[str, str, str]], when: datetime | None = None) -> int:
+        """Record (ecosystem, name, server) rows from the MCP registry. Returns how many names were new.
+
+        Rows are never removed: the registry is a preview and may reset its data,
+        and a package that was once an MCP server stays worth watching.
+        """
+        moment = iso(when or utcnow())
+        added = 0
+        with self._lock:
+            for ecosystem, name, server in rows:
+                cursor = self._conn.execute(
+                    """
+                    INSERT INTO mcp_packages (ecosystem, name, server, first_seen_at, last_seen_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(ecosystem, name) DO NOTHING
+                    """,
+                    (ecosystem, name, server, moment, moment),
+                )
+                if cursor.rowcount:
+                    added += 1
+                else:
+                    self._conn.execute(
+                        "UPDATE mcp_packages SET server = ?, last_seen_at = ? WHERE ecosystem = ? AND name = ?",
+                        (server, moment, ecosystem, name),
+                    )
+            self._conn.commit()
+        return added
+
+    def mcp_package_names(self, ecosystem: str) -> set[str]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT name FROM mcp_packages WHERE ecosystem = ?",
+                (ecosystem,),
+            ).fetchall()
+        return {str(row["name"]) for row in rows}
+
+    def mcp_counts(self) -> dict[str, int]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT ecosystem, COUNT(*) AS n FROM mcp_packages GROUP BY ecosystem"
+            ).fetchall()
+        found = {str(row["ecosystem"]): int(row["n"]) for row in rows}
+        return {"npm": found.get("npm", 0), "pypi": found.get("pypi", 0)}
+
+    def poll_watch(self, ecosystem: str) -> dict[str, int | None]:
+        """Names the npm or PyPI poll queues releases for: the ranked watchlist plus MCP packages.
+
+        An MCP package that is not on the ranked list has rank None. Typosquat
+        checks keep using ``watch_names`` so MCP names never count as popular.
+        """
+        watch: dict[str, int | None] = dict(self.watch_names(ecosystem))
+        for name in self.mcp_package_names(ecosystem):
+            watch.setdefault(name, None)
+        return watch
+
+    def record_openvsx_change(
+        self,
+        name: str,
+        version: str,
+        platform: str,
+        state: str,
+        published_at: str | None,
+        changed_at: str | None,
+        when: datetime | None = None,
+    ) -> str | None:
+        """Store one changes-feed row. Returns the state it had before, or None when it is new."""
+        moment = iso(when or utcnow())
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT state FROM openvsx_changes WHERE name = ? AND version = ? AND platform = ?",
+                (name, version, platform),
+            ).fetchone()
+            self._conn.execute(
+                """
+                INSERT INTO openvsx_changes
+                    (name, version, platform, state, published_at, changed_at, first_seen_at, last_seen_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(name, version, platform) DO UPDATE SET
+                    state = excluded.state,
+                    published_at = COALESCE(excluded.published_at, openvsx_changes.published_at),
+                    changed_at = excluded.changed_at,
+                    last_seen_at = excluded.last_seen_at
+                """,
+                (name, version, platform, state, published_at, changed_at, moment, moment),
+            )
+            self._conn.commit()
+        return None if row is None else str(row["state"])
+
+    def openvsx_platforms(self, name: str, version: str) -> dict[str, str]:
+        """Target platform -> state for one extension version."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT platform, state FROM openvsx_changes WHERE name = ? AND version = ?",
+                (name, version),
+            ).fetchall()
+        return {str(row["platform"]): str(row["state"]) for row in rows}
+
+    def openvsx_removed(self, limit: int = 500) -> list[dict]:
+        """Removed extension versions, newest first. Ground truth for benchmarks."""
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT name, version, platform, published_at, changed_at, last_seen_at
+                FROM openvsx_changes WHERE state = 'REMOVED'
+                ORDER BY last_seen_at DESC, name, version LIMIT ?
+                """,
+                (int(limit),),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def openvsx_counts(self) -> dict[str, int]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT state, COUNT(*) AS n FROM openvsx_changes GROUP BY state"
+            ).fetchall()
+        found = {str(row["state"]).lower(): int(row["n"]) for row in rows}
+        other = sum(count for state, count in found.items() if state not in {"active", "removed"})
+        return {"active": found.get("active", 0), "removed": found.get("removed", 0), "other": other}
