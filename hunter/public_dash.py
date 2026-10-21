@@ -37,7 +37,9 @@ UPLOAD_TIMEOUT_S = 5.0
 DEBOUNCE_S = 2.0
 CACHE_LIVE = "public, max-age=2"
 CACHE_TODAY = "public, max-age=60"
-CACHE_IMMUTABLE = "public, max-age=31536000, immutable"
+# Release detail objects change as triage, analyst and alert results arrive, so they
+# must revalidate like today's rollups rather than be cached as immutable.
+CACHE_RELEASE = CACHE_TODAY
 # Recent events the page replays at their real times. The window covers the page's
 # playback delay plus the longest normal gap between uploads, with room to spare.
 STREAM_WINDOW_S = 180
@@ -560,7 +562,7 @@ def publish_public_dash(
             _upload_objects(uploader, bucket, [(BENCHMARK_KEY, _encode(benchmark), CACHE_TODAY)])
             db.mark_public_dash_benchmark_published(bench_digest, when=now)
         for key, obj_key, digest, body in release_uploads:
-            _upload_objects(uploader, bucket, [(obj_key, body, CACHE_IMMUTABLE)])
+            _upload_objects(uploader, bucket, [(obj_key, body, CACHE_RELEASE)])
             db.mark_public_dash_release(key, digest)
         db.mark_public_dash_published_at(iso(now))
     except Exception as exc:

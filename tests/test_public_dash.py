@@ -213,6 +213,17 @@ def test_live_hash_kept_when_only_a_release_upload_fails(db):
     assert "TimeoutError" in (state["last_error"] or "")
 
 
+def test_release_objects_are_not_cached_as_immutable(db):
+    config = _dash_config()
+    client = MagicMock()
+    assert publish_public_dash(db, config, started=time.monotonic(), meter=None, client=client, now=utcnow()) is True
+    release_calls = [c.kwargs for c in client.put_object.call_args_list if c.kwargs["Key"].startswith("live/r/")]
+    assert release_calls
+    for call in release_calls:
+        assert call["CacheControl"] == "public, max-age=60"
+        assert "immutable" not in call["CacheControl"]
+
+
 def test_put_feed_object_refuses_unknown_keys():
     client = MagicMock()
     with pytest.raises(ValueError, match="non-public"):
