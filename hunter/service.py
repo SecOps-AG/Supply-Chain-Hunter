@@ -80,6 +80,7 @@ from hunter.registry import (
     refresh_watchlists,
     versions_after,
 )
+from hunter.takeover import score_pending_jobs
 from hunter.typosquat import TYPOSQUAT_QUEUE_LIMIT, NameIndex, typosquat_pairs
 from hunter.registry import parse_time
 from hunter.public_feed import publish_public_feed
@@ -810,7 +811,7 @@ def drain_jobs(
     limit: int | None = None,
 ) -> int:
     batch = config.classify_batch if limit is None else limit
-    jobs = db.pending_jobs(limit=max(0, batch))
+    jobs = db.pending_jobs(limit=max(0, batch), prioritize=getattr(config, "takeover_signals", False))
     if not jobs:
         return 0
     if stop is not None and stop.is_set():
@@ -850,6 +851,14 @@ def _record_job_failure(db: Database, config: Config, job, exc: BaseException) -
         log.exception("could not record a retry for %s %s %s", ecosystem, name, version)
 
 
+def _score_takeover_safely(db: Database, config: Config, transport: HttpGet) -> None:
+    """Account-takeover signals for the next pending jobs. A failure never blocks classify."""
+    try:
+        score_pending_jobs(db, config, transport)
+    except Exception:
+        log.exception("takeover signal pass failed")
+
+
 def drain_until_idle(
     db: Database,
     config: Config,
@@ -871,6 +880,8 @@ def drain_until_idle(
             return
         room = cap - classified
         n_jobs = 0
+        if room > 0 and getattr(config, "takeover_signals", False):
+            _score_takeover_safely(db, config, getattr(loader, "transport", http_get))
         if room > 0:
             n_jobs = drain_jobs(
                 db,
@@ -1320,6 +1331,8 @@ def health_payload(
     dash_state = db.public_dash_state()
     payload["dash_last_published_at"] = None if dash_state is None else dash_state["published_at"]
     payload["dash_last_error"] = None if dash_state is None else dash_state["last_error"]
+    if config is not None and getattr(config, "takeover_signals", False):
+        payload["takeover_signals"] = db.takeover_counts()
     if config is not None and config.actions:
         payload["github_actions"] = {**db.action_counts(), "token": bool(config.github_token)}
     if config is not None and getattr(config, "mcp_registry", False):

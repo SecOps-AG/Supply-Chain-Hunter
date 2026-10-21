@@ -343,6 +343,14 @@ class Config:
     openvsx_poll_interval: float = 300.0
     openvsx_page_size: int = 200
     openvsx_scout: bool = False
+    # Account-takeover signals from registry metadata before Scout (HUNTER_TAKEOVER_SIGNALS).
+    # Off by default. No model calls; on, the classify queue takes higher scores first.
+    takeover_signals: bool = False
+    takeover_batch: int = 50
+    takeover_dormant_days: int = 365
+    takeover_major_jump: int = 2
+    takeover_burst_count: int = 5
+    takeover_burst_hours: int = 24
     pypi_top_url: str = (
         "https://raw.githubusercontent.com/hugovk/top-pypi-packages/main/"
         "top-pypi-packages-30-days.min.json"
@@ -507,6 +515,12 @@ class Config:
             openvsx_poll_interval=max(60.0, float(os.environ.get("HUNTER_OPENVSX_POLL_INTERVAL", "300"))),
             openvsx_page_size=min(1000, max(1, int(os.environ.get("HUNTER_OPENVSX_PAGE_SIZE", "200")))),
             openvsx_scout=_flag("HUNTER_OPENVSX_SCOUT"),
+            takeover_signals=_flag("HUNTER_TAKEOVER_SIGNALS"),
+            takeover_batch=max(1, int(os.environ.get("HUNTER_TAKEOVER_BATCH", "50"))),
+            takeover_dormant_days=max(0, int(os.environ.get("HUNTER_TAKEOVER_DORMANT_DAYS", "365"))),
+            takeover_major_jump=max(0, int(os.environ.get("HUNTER_TAKEOVER_MAJOR_JUMP", "2"))),
+            takeover_burst_count=max(0, int(os.environ.get("HUNTER_TAKEOVER_BURST_COUNT", "5"))),
+            takeover_burst_hours=max(0, int(os.environ.get("HUNTER_TAKEOVER_BURST_HOURS", "24"))),
         )
 
 

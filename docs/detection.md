@@ -10,6 +10,23 @@ For each release it downloads the new archive and the previous one and diffs the
 
 Binary and media files aren't dropped. The diff records their kind, size, and a hash prefix instead of the bytes. Text files are read up to 8 MiB each; a longer file is cut and the release is marked as partly read.
 
+## Account-takeover signals
+
+Optional (`HUNTER_TAKEOVER_SIGNALS`, off by default). Before Scout reads a release, Hunter checks registry metadata only, with no model calls, for signs that a maintainer account was taken over. Each signal adds to a score, and the classify queue takes higher scores first, so Scout spend goes to the riskiest releases. The signals don't change a band on their own.
+
+| Signal | Weight | Source |
+| --- | --- | --- |
+| `provenance_lost` | 40 | The previous release had a provenance attestation and this one doesn't. npm: `/-/npm/v1/attestations/{name}@{version}`; PyPI: the Integrity API `/integrity/{project}/{version}/{file}/provenance`. |
+| `provenance_identity_changed` | 30 | Both have provenance, but the source repository or workflow differs. |
+| `publisher_new` | 25 | npm: the `_npmUser` that published this release never published an earlier one. |
+| `maintainer_added` | 20 | npm: a name in `maintainers` the previous release didn't list. PyPI: an owner in the JSON API `ownership` block that wasn't there when Hunter last scored the project. |
+| `publisher_email_changed` | 20 | npm: same publisher, new email. PyPI: none of the per-version author and maintainer emails match the previous release. |
+| `dormant_publish` | 15 | The previous release is older than `HUNTER_TAKEOVER_DORMANT_DAYS`. |
+| `semver_jump` | 10 | The major version moved by `HUNTER_TAKEOVER_MAJOR_JUMP` or more. |
+| `burst_publish` | 10 | `HUNTER_TAKEOVER_BURST_COUNT` or more versions inside `HUNTER_TAKEOVER_BURST_HOURS`. |
+
+When a metadata read fails, Hunter leaves that signal out and stores the error. An unknown is never counted as a loss.
+
 ## Decision model (Scout)
 
 The decision model doesn't ask Jev "is this malicious?". It asks many narrow questions, gets a probability for each, and feeds those into a small scoring model (a logistic regression in `hunter/logistic_head.json`) together with things Python measures better than a language model: counts, entropy, dependency names, and release timing. Jev and Clef are the providers. An OpenRouter chat model cannot take this role.

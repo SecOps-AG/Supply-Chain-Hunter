@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
@@ -272,6 +273,18 @@ class Database:
                 PRIMARY KEY (name, version, platform)
             );
             CREATE INDEX IF NOT EXISTS openvsx_changes_state ON openvsx_changes (state, last_seen_at);
+            CREATE TABLE IF NOT EXISTS takeover_signals (
+                ecosystem TEXT NOT NULL,
+                name TEXT NOT NULL,
+                version TEXT NOT NULL,
+                old_version TEXT,
+                score INTEGER NOT NULL,
+                signals_json TEXT NOT NULL,
+                detail_json TEXT NOT NULL,
+                error TEXT,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (ecosystem, name, version)
+            );
             """
         )
         self._conn.commit()
@@ -571,18 +584,139 @@ class Database:
                 return False
         return True
 
-    def pending_jobs(self, limit: int = 100) -> list[sqlite3.Row]:
+    def pending_jobs(self, limit: int = 100, *, prioritize: bool = False) -> list[sqlite3.Row]:
+        """Oldest first. `prioritize` puts a higher account-takeover score first."""
+        if not prioritize:
+            with self._lock:
+                rows = self._conn.execute(
+                    """
+                    SELECT ecosystem, name, version, rank FROM release_jobs
+                    WHERE status = 'pending'
+                    ORDER BY created_at, ecosystem, name, version
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+            return list(rows)
         with self._lock:
             rows = self._conn.execute(
                 """
-                SELECT ecosystem, name, version, rank FROM release_jobs
-                WHERE status = 'pending'
-                ORDER BY created_at, ecosystem, name, version
+                SELECT j.ecosystem, j.name, j.version, j.rank FROM release_jobs AS j
+                LEFT JOIN takeover_signals AS t
+                    ON t.ecosystem = j.ecosystem AND t.name = j.name AND t.version = j.version
+                WHERE j.status = 'pending'
+                ORDER BY COALESCE(t.score, 0) DESC, j.created_at, j.ecosystem, j.name, j.version
                 LIMIT ?
                 """,
                 (limit,),
             ).fetchall()
         return list(rows)
+
+    def unscored_pending_jobs(self, ecosystems: tuple[str, ...], limit: int = 50) -> list[sqlite3.Row]:
+        """Pending jobs with no takeover-signal row yet, in queue order."""
+        if not ecosystems or limit <= 0:
+            return []
+        marks = ",".join("?" for _ in ecosystems)
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT j.ecosystem, j.name, j.version, j.rank FROM release_jobs AS j
+                LEFT JOIN takeover_signals AS t
+                    ON t.ecosystem = j.ecosystem AND t.name = j.name AND t.version = j.version
+                WHERE j.status = 'pending' AND t.name IS NULL AND j.ecosystem IN ({marks})
+                ORDER BY j.created_at, j.ecosystem, j.name, j.version
+                LIMIT ?
+                """,
+                (*ecosystems, limit),
+            ).fetchall()
+        return list(rows)
+
+    def save_takeover_signals(
+        self,
+        ecosystem: str,
+        name: str,
+        version: str,
+        score: int,
+        signals: list[str],
+        detail: dict,
+        *,
+        old_version: str | None = None,
+        error: str = "",
+        when: datetime | None = None,
+    ) -> None:
+        moment = iso(when or utcnow())
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO takeover_signals (
+                    ecosystem, name, version, old_version, score, signals_json, detail_json, error, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(ecosystem, name, version) DO UPDATE SET
+                    old_version = excluded.old_version,
+                    score = excluded.score,
+                    signals_json = excluded.signals_json,
+                    detail_json = excluded.detail_json,
+                    error = excluded.error,
+                    created_at = excluded.created_at
+                """,
+                (
+                    ecosystem,
+                    name,
+                    version,
+                    old_version,
+                    int(score),
+                    json.dumps(list(signals)),
+                    json.dumps(detail, sort_keys=True, default=str),
+                    error or None,
+                    moment,
+                ),
+            )
+            self._conn.commit()
+
+    def takeover_signals(self, ecosystem: str, name: str, version: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM takeover_signals WHERE ecosystem = ? AND name = ? AND version = ?",
+                (ecosystem, name, version),
+            ).fetchone()
+        if row is None:
+            return None
+        found = dict(row)
+        found["signals"] = json.loads(found.pop("signals_json") or "[]")
+        found["detail"] = json.loads(found.pop("detail_json") or "{}")
+        return found
+
+    def last_takeover_owners(self, ecosystem: str, name: str, *, exclude_version: str | None = None) -> set[str] | None:
+        """Owner names recorded with the newest scored release of this package, or None."""
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT version, detail_json FROM takeover_signals
+                WHERE ecosystem = ? AND name = ?
+                ORDER BY created_at DESC
+                """,
+                (ecosystem, name),
+            ).fetchall()
+        for row in rows:
+            if exclude_version is not None and str(row["version"]) == exclude_version:
+                continue
+            try:
+                owners = (json.loads(row["detail_json"] or "{}") or {}).get("owners")
+            except ValueError:
+                continue
+            if owners:
+                return {str(item) for item in owners}
+        return None
+
+    def takeover_counts(self) -> dict:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT COUNT(*) AS scored, SUM(CASE WHEN score > 0 THEN 1 ELSE 0 END) AS flagged
+                FROM takeover_signals
+                """
+            ).fetchone()
+        return {"scored": int(row["scored"] or 0), "flagged": int(row["flagged"] or 0)}
 
     def reopen_job(self, ecosystem: str, name: str, version: str, rank: int | None = None) -> None:
         moment = iso(utcnow())

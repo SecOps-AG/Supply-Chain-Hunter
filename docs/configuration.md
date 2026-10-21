@@ -193,6 +193,21 @@ Off by default. When on, Hunter reads the Open VSX changes feed (`/api/-/version
 
 Localhost `/health` adds an `openvsx` block with recorded active, removed and other versions. `HUNTER_MAX_PENDING` applies: a full queue pauses the feed at that page.
 
+## Account-takeover signals
+
+Off by default. With `HUNTER_TAKEOVER_SIGNALS=on`, Hunter reads registry metadata for each pending npm and PyPI release before Scout and records account-takeover signals for it. No archive is downloaded and no model is called. The classify queue then takes the highest score first; releases with no signals keep their usual oldest-first order. How the signals work: [detection.md](detection.md#account-takeover-signals).
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `HUNTER_TAKEOVER_SIGNALS` | off | `on` records the signals and orders the classify queue by them. |
+| `HUNTER_TAKEOVER_BATCH` | `50` | Most pending releases scored per classify round. |
+| `HUNTER_TAKEOVER_DORMANT_DAYS` | `365` | Days without a release before a new one counts as a dormant publish. `0` turns it off. |
+| `HUNTER_TAKEOVER_MAJOR_JUMP` | `2` | Major-version step that counts as a semver jump. `0` turns it off. |
+| `HUNTER_TAKEOVER_BURST_COUNT` | `5` | Versions inside the burst window that count as burst publishing. `0` turns it off. |
+| `HUNTER_TAKEOVER_BURST_HOURS` | `24` | Length of the burst window in hours. |
+
+Signals are stored per release in the `takeover_signals` table. Localhost `/health` adds a `takeover_signals` block with how many releases were scored and how many had at least one signal.
+
 ## Performance and storage
 
 | Variable | Default | What it does |
