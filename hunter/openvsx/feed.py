@@ -10,11 +10,12 @@ from __future__ import annotations
 import json
 import logging
 import threading
+from datetime import datetime
 from urllib.parse import quote
 
 from hunter.db import Database, utcnow
 from hunter.openvsx import ECOSYSTEM, release_name
-from hunter.registry import FeedError, HttpGet, http_get
+from hunter.registry import FeedError, HttpGet, http_get, parse_time
 
 log = logging.getLogger("hunter.openvsx.feed")
 
@@ -39,6 +40,17 @@ def fetch_changes(base: str, checkpoint: str, size: int, transport: HttpGet = ht
     if data.get("error"):
         raise FeedError(f"Open VSX changes feed: {str(data['error'])[:200]}")
     return data
+
+
+def _latest_timestamp(changes: list) -> str | None:
+    """The newest ``timestamp`` on a page, as the feed wrote it."""
+    best: tuple[datetime, str] | None = None
+    for change in changes:
+        raw = str(change.get("timestamp") or "").strip() if isinstance(change, dict) else ""
+        when = parse_time(raw)
+        if when is not None and when.tzinfo is not None and (best is None or when > best[0]):
+            best = (when, raw)
+    return best[1] if best else None
 
 
 def _queue(db: Database, name: str, version: str, max_pending: int | None) -> str:
@@ -107,6 +119,12 @@ def poll_openvsx(db: Database, config, transport: HttpGet = http_get, stop: thre
         if following and str(following) != checkpoint:
             checkpoint = str(following)
             db.set_checkpoint(CHECKPOINT, checkpoint)
+        elif not following:
+            # A last page with no cursor: start the next poll at its newest change, not the old start.
+            latest = _latest_timestamp(changes)
+            if latest and f"{SINCE_PREFIX}{latest}" != checkpoint:
+                checkpoint = f"{SINCE_PREFIX}{latest}"
+                db.set_checkpoint(CHECKPOINT, checkpoint)
         if not page.get("hasMore") or not changes or not following:
             break
     db.mark_poll_success(CHECKPOINT)

@@ -355,7 +355,7 @@ def classify_openvsx_job(
     loader: ReleaseLoader,
     transport: HttpGet = http_get,
 ) -> None:
-    """One Open VSX extension release: rules first, Scout on rule hits when allowed, then Triage routing."""
+    """One Open VSX extension release: rules first, Scout when allowed, then Triage routing."""
 
     def _review():
         return classify_extension(db, config, job, transport=transport, jev=jev)

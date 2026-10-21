@@ -14,7 +14,8 @@ from hunter.db import Database
 from hunter.mcp_registry import package_name, poll_mcp_registry, server_packages
 from hunter.openvsx import ECOSYSTEM, pick_platform, release_name
 from hunter.openvsx.feed import CHECKPOINT, SINCE_PREFIX, poll_openvsx
-from hunter.openvsx.review import manifest_signals, predecessor
+from hunter.models import RuleHit, RuleReport
+from hunter.openvsx.review import manifest_signals, predecessor, routes, scout_reads, version_api_url
 from hunter.public_feed import PublicAlert, alert_title, public_registry_url
 from hunter.registry import FeedError
 from hunter.rules.registry import load_pack
@@ -310,6 +311,26 @@ def test_a_full_queue_leaves_the_page_for_the_next_poll(tmp_path):
     assert db.get_checkpoint(CHECKPOINT) == "c1"
 
 
+def test_a_last_page_without_a_cursor_moves_the_start_to_its_newest_change(tmp_path):
+    db = Database(tmp_path / "hunter.sqlite3")
+    config = _config(tmp_path)
+    start = f"{SINCE_PREFIX}2026-10-20T00:00:00.000000Z"
+    db.set_checkpoint(CHECKPOINT, start)
+    page = {
+        "changes": [
+            _change("p", "a", "1.0.0", stamp="2026-10-20T01:00:00Z"),
+            _change("p", "b", "1.0.0", stamp="2026-10-20T03:00:00Z"),
+            _change("p", "c", "1.0.0", stamp="2026-10-20T02:00:00Z"),
+        ],
+        "hasMore": False,
+    }
+    assert poll_openvsx(db, config, ChangesFeed({start: page})) == 3
+    assert db.get_checkpoint(CHECKPOINT) == f"{SINCE_PREFIX}2026-10-20T03:00:00Z"
+    db.set_checkpoint(CHECKPOINT, start)
+    poll_openvsx(db, config, ChangesFeed({start: {"changes": [], "hasMore": False}}))
+    assert db.get_checkpoint(CHECKPOINT) == start
+
+
 def test_a_feed_error_raises_and_keeps_the_checkpoint(tmp_path):
     db = Database(tmp_path / "hunter.sqlite3")
     db.set_checkpoint(CHECKPOINT, "c0")
@@ -339,17 +360,27 @@ def _manifest(**extra) -> str:
 class OpenVsxApi:
     """Version metadata and .vsix downloads for one extension."""
 
-    def __init__(self, versions: dict[str, dict[str, str]], publishers: dict[str, str] | None = None, platform="universal"):
+    def __init__(
+        self,
+        versions: dict[str, dict[str, str]],
+        publishers: dict[str, str] | None = None,
+        platform="universal",
+        builds: dict[str, str] | None = None,
+    ):
         self.versions = versions
         self.publishers = publishers or {}
         self.platform = platform
+        # Version -> its one build, when it differs from ``platform``.
+        self.builds = builds or {}
         self.urls: list[str] = []
 
     def __call__(self, url: str, timeout: float) -> bytes:
         self.urls.append(url)
-        prefix = f"{VSX}/api/pub/ext/{self.platform}/"
+        prefix = f"{VSX}/api/pub/ext/"
         if url.startswith(prefix):
-            version = url[len(prefix) :]
+            platform, _sep, version = url[len(prefix) :].partition("/")
+            if platform != self.builds.get(version, self.platform):
+                raise FeedError("HTTP Error 404: Not Found")
             listed = {"latest": "x"}
             listed.update({key: "x" for key in sorted(self.versions, reverse=True)})
             return json.dumps(
@@ -390,6 +421,35 @@ def test_predecessor_and_manifest_signals():
     new = {"extension/package.json": _manifest(extensionPack=["evil.twin"], activationEvents=["*"])}
     assert manifest_signals(old, new) == ["vsx_extension_pack_added", "vsx_activation_widened"]
     assert manifest_signals({}, new) == []
+
+
+def test_a_bundler_move_of_main_is_not_a_medium_signal():
+    old = {"extension/package.json": _manifest()}
+    moved = {"extension/package.json": _manifest(main="./dist/extension.js")}
+    assert manifest_signals(old, moved) == ["vsx_main_moved"]
+    assert manifest_signals(old, {"extension/package.json": _manifest(main="dist/extension")}) == ["vsx_main_moved"]
+    for main in ("./dist/run.sh", "../outside.js", "/tmp/x.js", "./bin/native.node"):
+        assert manifest_signals(old, {"extension/package.json": _manifest(main=main)}) == ["vsx_main_changed"], main
+    declarative = {"extension/package.json": json.dumps({"name": "ext", "publisher": "pub"})}
+    assert manifest_signals(declarative, old) == ["vsx_main_changed"]
+
+
+def test_one_medium_signal_with_a_weak_hit_does_not_route_to_triage():
+    weak = RuleReport(verdict="unsure", hits=[RuleHit("h_shell", "weak", "extension/out/extension.js", 1, "child_process")])
+    strong = RuleReport(verdict="malicious", hits=[RuleHit("x", "strong", "extension/out/extension.js", 1, "x")])
+    assert not routes(["vsx_main_changed"], weak)
+    assert not routes(["vsx_main_moved", "vsx_publisher_changed"], weak)
+    assert routes(["vsx_main_changed", "vsx_publisher_changed"], RuleReport())
+    assert routes([], strong)
+    assert not scout_reads([], weak)
+    assert not scout_reads(["vsx_main_moved"], weak)
+    assert scout_reads(["vsx_main_changed"], weak)
+    assert scout_reads([], strong)
+    assert not scout_reads(["vsx_main_changed"], RuleReport())
+
+
+def test_version_api_url_escapes_the_version():
+    assert version_api_url(VSX, "pub.ext", "universal", "1.0.0?x#y") == f"{VSX}/api/pub/ext/universal/1.0.0%3Fx%23y"
 
 
 def test_a_quiet_update_is_stored_benign_without_triage(tmp_path):
@@ -442,6 +502,36 @@ def test_a_platform_build_is_diffed_when_there_is_no_universal_one(tmp_path):
     row = _payload(db, "2.0.0")
     assert "vsx_platform:linux-x64" in row["signals"]
     assert any("/linux-x64/2.0.0" in url for url in api.urls)
+
+
+def test_the_predecessor_is_read_from_its_own_recorded_build(tmp_path):
+    db = Database(tmp_path / "hunter.sqlite3")
+    config = _config(tmp_path, openvsx=True)
+    api = OpenVsxApi(
+        {"1.0.0": {"package.json": _manifest()}, "2.0.0": {"package.json": _manifest()}},
+        platform="linux-x64",
+        builds={"1.0.0": "universal"},
+    )
+    db.record_openvsx_change("pub.ext", "1.0.0", "universal", "ACTIVE", None, None)
+    _queue(db, "2.0.0", platform="linux-x64")
+    _run(db, config, api)
+    row = _payload(db, "2.0.0")
+    assert row["band"] == "benign" and row["old_version"] == "1.0.0"
+    assert not any("/linux-x64/1.0.0" in url for url in api.urls)
+
+
+def test_an_unrecorded_predecessor_build_is_found_by_trying_the_others(tmp_path):
+    db = Database(tmp_path / "hunter.sqlite3")
+    config = _config(tmp_path, openvsx=True)
+    api = OpenVsxApi(
+        {"1.0.0": {"package.json": _manifest()}, "2.0.0": {"package.json": _manifest()}},
+        builds={"1.0.0": "win32-x64"},
+    )
+    _queue(db, "2.0.0")
+    _run(db, config, api)
+    row = _payload(db, "2.0.0")
+    assert row["band"] == "benign" and row["old_version"] == "1.0.0"
+    assert any("/win32-x64/1.0.0" in url for url in api.urls)
 
 
 def test_a_version_removed_before_review_is_not_downloaded(tmp_path):

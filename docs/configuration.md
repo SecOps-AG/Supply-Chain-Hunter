@@ -181,7 +181,7 @@ Localhost `/health` adds an `mcp_registry` block with the number of npm and PyPI
 
 ## Open VSX
 
-Off by default. When on, Hunter reads the Open VSX changes feed (`/api/-/version-changes`) and diffs each new extension version's `.vsix` against the previous version of the same build (universal first, else one platform build). The first poll starts the feed at the current time. The npm rules read every release, plus checks on `extension/package.json`: a new `extensionPack` or `extensionDependencies` entry, eager activation (`*` or `onStartupFinished`), a changed `main` or `browser` entry, and a different publisher. A malicious rule verdict, two of those checks, or one with a rule hit sends the release to Triage; everything else is stored without a model call. Removals in the feed (`state: REMOVED`) are recorded with their extension and version as ground truth.
+Off by default. When on, Hunter reads the Open VSX changes feed (`/api/-/version-changes`) and diffs each new extension version's `.vsix` against the previous version of the same build (universal first, else one platform build). The first poll starts the feed at the current time. The npm rules read every release, plus checks on `extension/package.json`: a new `extensionPack` or `extensionDependencies` entry, eager activation (`*` or `onStartupFinished`), a changed `main` or `browser` entry, and a different publisher. A `main` or `browser` entry that moves from one JavaScript file inside the extension to another (a bundler change such as `./out/extension.js` to `./dist/extension.js`) does not count. A malicious rule verdict or two of those checks sends the release to Triage; everything else is stored without a model call. The predecessor is read from its own build, which can differ from the new version's when an extension switches between a universal build and per-platform builds. Removals in the feed (`state: REMOVED`) are recorded with their extension and version as ground truth.
 
 | Variable | Default | What it does |
 | --- | --- | --- |
@@ -189,7 +189,7 @@ Off by default. When on, Hunter reads the Open VSX changes feed (`/api/-/version
 | `HUNTER_OPENVSX_URL` | `https://open-vsx.org` | Registry origin. |
 | `HUNTER_OPENVSX_POLL_INTERVAL` | `300` | Seconds between feed polls (at least 60). |
 | `HUNTER_OPENVSX_PAGE_SIZE` | `200` | Changes per feed page (at most 1000). |
-| `HUNTER_OPENVSX_SCOUT` | off | `on` lets Scout read an Open VSX release, only when a rule hit. |
+| `HUNTER_OPENVSX_SCOUT` | off | `on` lets Scout read an Open VSX release, only on a malicious rule verdict or a rule hit together with one of the checks above. |
 
 Localhost `/health` adds an `openvsx` block with recorded active, removed and other versions. `HUNTER_MAX_PENDING` applies: a full queue pauses the feed at that page.
 

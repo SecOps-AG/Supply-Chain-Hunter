@@ -1,7 +1,8 @@
 """Review one Open VSX extension release: download two ``.vsix`` files, rules first, then routing.
 
 Called by ``service.classify_job`` for ``openvsx`` jobs. The rules read every
-release. Scout reads it only when a rule hit and ``HUNTER_OPENVSX_SCOUT`` is on.
+release. Scout reads it only when ``HUNTER_OPENVSX_SCOUT`` is on and the rule
+verdict is malicious or a rule hit comes with a manifest change.
 Nothing here alerts: a routed row goes to Triage, and only an Analyst-confirmed
 verdict reaches the webhook and the public feed, as for npm and PyPI.
 """
@@ -10,12 +11,14 @@ from __future__ import annotations
 
 import json
 import logging
+import posixpath
 from pathlib import Path
+from urllib.parse import quote
 
 from hunter.archives import ArchiveError, DiskTree, aligned_release_trees, close_trees, extract_archive
 from hunter.bands import REVIEW_THRESHOLD
 from hunter.models import Classification, ReleaseMeta, RuleReport
-from hunter.openvsx import ECOSYSTEM, UNIVERSAL, extension_url, pick_platform, split_name
+from hunter.openvsx import ECOSYSTEM, PLATFORM_ORDER, UNIVERSAL, extension_url, pick_platform, split_name
 from hunter.registry import PACKAGE_DOWNLOAD_MAX_BYTES, FeedError, HttpGet, fetch_capped, parse_time
 from hunter.rules.engine import scan_release
 from hunter.triage import changed_diffs
@@ -25,7 +28,7 @@ log = logging.getLogger("hunter.openvsx.review")
 MODEL_ID = "deterministic"
 STRONG_PROBABILITY = 0.55
 MANIFEST = "extension/package.json"
-# Each is one reason to read the release. Two of them, or one with a rule hit, route it to Triage.
+# Each is one reason to read the release. Two of them route it to Triage; one with a rule hit lets Scout read it.
 MEDIUM = frozenset(
     {
         "vsx_extension_pack_added",
@@ -36,6 +39,7 @@ MEDIUM = frozenset(
 )
 _ALIASES = {"latest", "pre-release", "prerelease"}
 _EAGER_ACTIVATION = {"*", "onstartupfinished"}
+_JS_SUFFIXES = {"", ".js", ".cjs", ".mjs"}
 
 
 def _json(blob: bytes) -> dict:
@@ -49,7 +53,7 @@ def _json(blob: bytes) -> dict:
 
 def version_api_url(base: str, name: str, platform: str, version: str) -> str:
     namespace, extension = split_name(name)
-    return f"{base.rstrip('/')}/api/{namespace}/{extension}/{platform}/{version}"
+    return f"{base.rstrip('/')}/api/{namespace}/{extension}/{platform}/{quote(version, safe='')}"
 
 
 def predecessor(document: dict, version: str) -> str | None:
@@ -100,6 +104,16 @@ def _names(value) -> set[str]:
     return {str(item).strip().lower() for item in value if str(item).strip()}
 
 
+def _bundled_js(value) -> bool:
+    """A relative JavaScript path inside the extension, such as ``./out/extension.js``."""
+    if not isinstance(value, str) or not value.strip() or "\\" in value or ":" in value:
+        return False
+    path = posixpath.normpath(value.strip())
+    if path.startswith("/") or path == ".." or path.startswith("../"):
+        return False
+    return posixpath.splitext(path)[1].lower() in _JS_SUFFIXES
+
+
 def manifest_signals(old_files, new_files) -> list[str]:
     """Changes in ``extension/package.json`` that sleeper extensions use to turn hostile."""
     if not old_files:
@@ -115,19 +129,26 @@ def manifest_signals(old_files, new_files) -> list[str]:
             break
     if (_names(new.get("activationEvents")) - _names(old.get("activationEvents"))) & _EAGER_ACTIVATION:
         found.append("vsx_activation_widened")
-    if any(new.get(key) != old.get(key) for key in ("main", "browser")):
-        found.append("vsx_main_changed")
+    moved = [key for key in ("main", "browser") if new.get(key) != old.get(key)]
+    if moved:
+        # A bundler move (``./out/extension.js`` -> ``./dist/extension.js``) is routine; a new entry point is not.
+        routine = all(_bundled_js(old.get(key)) and (key not in new or _bundled_js(new.get(key))) for key in moved)
+        found.append("vsx_main_moved" if routine else "vsx_main_changed")
     return found
 
 
 def routes(signals: list[str], report: RuleReport | None) -> bool:
-    """Send to Triage: a malicious rule verdict, two medium signals, or a rule hit with one."""
-    medium = [sig for sig in signals if sig in MEDIUM]
+    """Send to Triage: a malicious rule verdict or two medium signals. Weak rule hits alone never do."""
     if report is not None and report.verdict == "malicious":
         return True
-    if len(medium) >= 2:
+    return sum(1 for sig in signals if sig in MEDIUM) >= 2
+
+
+def scout_reads(signals: list[str], report: RuleReport) -> bool:
+    """Scout reads a malicious rule verdict, or a rule hit that comes with a medium signal."""
+    if report.verdict == "malicious":
         return True
-    return bool(medium) and report is not None and bool(report.hits)
+    return bool(report.hits) and any(sig in MEDIUM for sig in signals)
 
 
 def _row(meta: ReleaseMeta, *, band: str, probability: float, signals: list[str]) -> Classification:
@@ -154,7 +175,7 @@ def review_trees(
     jev=None,
     popular_names: set[str] | None = None,
 ) -> Classification:
-    """Rules and manifest signals on both trees; Scout only when given and a rule hit."""
+    """Rules and manifest signals on both trees; Scout only when given and ``scout_reads`` allows it."""
     old_files, new_files = aligned_release_trees(
         old_files,
         new_files,
@@ -170,7 +191,7 @@ def review_trees(
         log.exception("%s %s: rule scan failed", meta.name, meta.new_version)
         report = RuleReport(verdict="unsure", unscanned=[("", "unscanned:rule_error")])
     signals = list(dict.fromkeys(extra_signals + manifest_signals(old_files, new_files) + report.signals()))
-    if jev is not None and (report.hits or report.verdict == "malicious"):
+    if jev is not None and scout_reads(signals, report):
         from hunter.classify import classify_files
 
         scout = classify_files(
@@ -201,6 +222,18 @@ def review_trees(
     return row
 
 
+def _old_document(transport: HttpGet, base: str, name: str, version: str, platforms: dict[str, str], new_platform: str):
+    """The predecessor's metadata. Its build can differ from the new one (universal <-> per-platform)."""
+    first = new_platform if platforms.get(new_platform) == "ACTIVE" else pick_platform(platforms)
+    error: FeedError | None = None
+    for platform in dict.fromkeys([first or new_platform, new_platform, *PLATFORM_ORDER]):
+        try:
+            return _json(transport(version_api_url(base, name, platform, version), 60))
+        except FeedError as exc:
+            error = exc
+    raise error
+
+
 def classify_extension(db, config, job, *, transport: HttpGet, jev=None):
     """Download, review and route one Open VSX job.
 
@@ -226,7 +259,9 @@ def classify_extension(db, config, job, *, transport: HttpGet, jev=None):
         return _row(meta, band="benign", probability=0.0, signals=["vsx_removed_before_review"]), None, None, meta
     document = _json(transport(version_api_url(base, name, platform, version), 60))
     previous = predecessor(document, version)
-    old_document = _json(transport(version_api_url(base, name, platform, previous), 60)) if previous else {}
+    old_document = (
+        _old_document(transport, base, name, previous, db.openvsx_platforms(name, previous), platform) if previous else {}
+    )
     meta = ReleaseMeta(
         ecosystem=ECOSYSTEM,
         name=name,
