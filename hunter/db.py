@@ -1441,6 +1441,22 @@ class Database:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def ground_truth_releases(self, since: str) -> list[dict]:
+        """npm and PyPI releases scored at or after `since`, with the confirmed public-alert time if any."""
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT r.ecosystem, r.name, r.version, r.band, r.created_at,
+                       p.first_seen_at AS confirmed_at
+                FROM releases r
+                LEFT JOIN public_feed_items p
+                  ON p.ecosystem = r.ecosystem AND p.name = r.name AND p.version = r.version
+                WHERE r.ecosystem IN ('npm', 'pypi') AND r.created_at >= ?
+                """,
+                (since,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def investigations_since(self, since: str, limit: int = 5000) -> list[dict]:
         with self._lock:
             rows = self._conn.execute(

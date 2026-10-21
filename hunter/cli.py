@@ -357,6 +357,33 @@ def _cmd_actions(args, config: Config) -> int:
     return 0
 
 
+def _cmd_ground_truth(args, config: Config) -> int:
+    """Compare scored releases with OSV MAL- records and npm takedowns. Reads JSON only."""
+    from hunter.ground_truth import make_source, run_ground_truth
+
+    try:
+        source = make_source(config, args.source)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    db = Database(config.db_path)
+    try:
+        report = run_ground_truth(
+            db,
+            config,
+            source=source,
+            days=args.days,
+            fetch=not args.offline,
+            out=Path(args.out) if args.out else None,
+        )
+    finally:
+        db.close()
+    payload = report if args.full else {key: value for key, value in report.items() if key != "items"}
+    json.dump(payload, sys.stdout, indent=2, sort_keys=True)
+    sys.stdout.write("\n")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="hunter",
@@ -459,6 +486,17 @@ def build_parser() -> argparse.ArgumentParser:
     actions_sub.add_parser("status", help="print watched actions, recorded tags, and tag events today").set_defaults(
         func=_cmd_actions
     )
+
+    truth = sub.add_parser(
+        "ground-truth",
+        help="compare scored npm and PyPI releases with OSV MAL- records and npm takedowns; print recall and time-to-detect",
+    )
+    truth.add_argument("--source", choices=("api", "git"), default=None, help="OSV source (default: HUNTER_GROUND_TRUTH_SOURCE or api)")
+    truth.add_argument("--days", type=_non_negative_int, default=None, help="look back this many days; 0 means all releases")
+    truth.add_argument("--out", default="", help="report path (default: ground-truth-report.json in the data dir)")
+    truth.add_argument("--offline", action="store_true", help="use cached OSV records and takedowns; no network")
+    truth.add_argument("--full", action="store_true", help="print every labeled release, not only the summary")
+    truth.set_defaults(func=_cmd_ground_truth)
 
     models = sub.add_parser(
         "models",
