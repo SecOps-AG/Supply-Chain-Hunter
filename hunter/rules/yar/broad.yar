@@ -11,11 +11,13 @@ rule h_decode_exec
     $b64 = "\x62ase64" nocase ascii
     $atob = "atob" nocase ascii
     $codecs = "codecs.decode" nocase ascii
-    $exec = "\x65xec" nocase ascii
-    $eval = "eval" nocase ascii
+    // Whole words only, so execute, executor, evaluate and retrieval do not count.
+    $exec = /\b\x65xec\b/ nocase ascii
+    $eval = /\beval\b/ nocase ascii
     $exs = "\x65xecSync" nocase ascii
     $spawn = "spawn" nocase ascii
-    $fn = "Function(" nocase ascii
+    // Case-sensitive, so the function keyword and isFunction( do not count.
+    $fn = /\bFunction\s*\(/ ascii
   condition:
     (
       for any i in (1 .. #b64) : (
@@ -89,38 +91,10 @@ rule h_shell
     $pipe = "| sh" ascii
     $pipeb = "| bash" ascii
   condition:
-    for any i in (1 .. #cp) : (
-      @cp[i] < filesize and uint8(@cp[i]) == 0x63 and uint8(@cp[i] + 1) == 0x68
-    ) or
-    for any i in (1 .. #exs) : (
-      @exs[i] < filesize and uint8(@exs[i]) == 0x65
-    ) or
-    for any i in (1 .. #sps) : (
-      @sps[i] < filesize and uint8(@sps[i]) == 0x73
-    ) or
-    for any i in (1 .. #sys) : (
-      @sys[i] < filesize and uint8(@sys[i]) == 0x6f
-    ) or
-    for any i in (1 .. #sub) : (
-      @sub[i] < filesize and uint8(@sub[i]) == 0x73
-    ) or
-    for any i in (1 .. #po) : (
-      @po[i] < filesize and uint8(@po[i]) == 0x50
-    ) or
-    for any i in (1 .. #cc) : (
-      @cc[i] < filesize and uint8(@cc[i]) == 0x63
-    ) or
-    for any i in (1 .. #rt) : (
-      @rt[i] < filesize and uint8(@rt[i]) == 0x52
-    ) or
-    (
-      for any i in (1 .. #curl) : (
-        @curl[i] < filesize and
-        (
-          $pipe in (@curl[i] .. @curl[i] + 210) or
-          $pipeb in (@curl[i] .. @curl[i] + 210)
-        )
-      )
+    $cp or $exs or $sps or $sys or $sub or $po or $cc or $rt or
+    for any i in (1 .. #curl) : (
+      $pipe in (@curl[i] .. @curl[i] + 210) or
+      $pipeb in (@curl[i] .. @curl[i] + 210)
     )
 }
 
@@ -143,8 +117,19 @@ rule h_credential
     $i = ".ssh\x2f" nocase ascii
     $j = "authorized_keys" nocase ascii
     $k = "credentials.json" nocase ascii
+    // A workflow handing the job its own token: secrets.GITHUB_TOKEN, or
+    // GITHUB_TOKEN / GH_TOKEN set from it or from github.token.
+    $fsec = "secrets.GITHUB_TOKEN" nocase ascii
+    $fenv = /\b(GITHUB_TOKEN|GH_TOKEN)\s*:\s*\$\{\{\s*(secrets\.GITHUB_TOKEN|github\.token)\s*\}\}/ nocase ascii
   condition:
-    $a or $b or $c or $d or $e or $f or $g or $h or $i or $j or $k
+    $a or $b or $c or $d or $g or $h or $i or $j or $k or
+    for any i in (1 .. #e) : (
+      not for any j in (1 .. #fenv) : (@fenv[j] == @e[i])
+    ) or
+    for any i in (1 .. #f) : (
+      not $fsec at (@f[i] - 8) and
+      not for any j in (1 .. #fenv) : (@fenv[j] == @f[i])
+    )
 }
 
 rule h_xor
@@ -156,23 +141,18 @@ rule h_xor
     summary = "Characters are decoded with XOR."
   strings:
     $xor = "xor" nocase ascii
-    $cc = "charCodeAt" ascii
+    // xorshift, xoroshiro and xorwow are random number generators, not decoders.
+    $prng = /xor(shift|oshiro|wow)/ nocase ascii
+    // The XOR is applied to the char code itself. A string hash puts it before.
+    $ccx = /charCodeAt\([^()]{0,24}\)\)?\s*\^/ ascii
     $fcc = "\x66romCharCode" ascii
     $op1 = ") ^" ascii
     $op2 = ")^" ascii
     $op3 = ")  ^" ascii
     $op5 = " ^ " ascii
   condition:
-    for any i in (1 .. #xor) : (
-      @xor[i] < filesize and
-      uint8(@xor[i]) != 0x00
-    ) or
-    for any i in (1 .. #cc) : (
-      $op1 in (@cc[i] .. @cc[i] + 48) or
-      $op2 in (@cc[i] .. @cc[i] + 48) or
-      $op3 in (@cc[i] .. @cc[i] + 48) or
-      $op5 in (@cc[i] .. @cc[i] + 56)
-    ) or
+    #xor > #prng or
+    $ccx or
     for any i in (1 .. #fcc) : (
       $op1 in (@fcc[i] .. @fcc[i] + 90) or
       $op2 in (@fcc[i] .. @fcc[i] + 90) or
@@ -196,22 +176,29 @@ rule h_encoded_import
     $dec = "decodeURIComponent" ascii
     $buf = "Buffer.from" ascii
     $b64 = "\x62ase64" ascii
+    // A plain module name such as require("base64-js") decodes nothing.
+    $reqlit = /require\(\s*["'][A-Za-z0-9@._\/-]{1,80}["']\s*\)/ ascii
+    $implit = /import\(\s*["'][A-Za-z0-9@._\/-]{1,80}["']\s*\)/ ascii
   condition:
     (
       for any i in (1 .. #req) : (
-        $atob in (@req[i] .. @req[i] + 24) or
-        $un in (@req[i] .. @req[i] + 24) or
-        $dec in (@req[i] .. @req[i] + 28) or
-        $buf in (@req[i] .. @req[i] + 24) or
-        $b64 in (@req[i] .. @req[i] + 40)
+        not $reqlit at @req[i] and (
+          $atob in (@req[i] .. @req[i] + 24) or
+          $un in (@req[i] .. @req[i] + 24) or
+          $dec in (@req[i] .. @req[i] + 28) or
+          $buf in (@req[i] .. @req[i] + 24) or
+          $b64 in (@req[i] .. @req[i] + 40)
+        )
       )
     ) or (
       for any i in (1 .. #imp) : (
-        $atob in (@imp[i] .. @imp[i] + 24) or
-        $un in (@imp[i] .. @imp[i] + 24) or
-        $dec in (@imp[i] .. @imp[i] + 28) or
-        $buf in (@imp[i] .. @imp[i] + 24) or
-        $b64 in (@imp[i] .. @imp[i] + 40)
+        not $implit at @imp[i] and (
+          $atob in (@imp[i] .. @imp[i] + 24) or
+          $un in (@imp[i] .. @imp[i] + 24) or
+          $dec in (@imp[i] .. @imp[i] + 28) or
+          $buf in (@imp[i] .. @imp[i] + 24) or
+          $b64 in (@imp[i] .. @imp[i] + 40)
+        )
       )
     )
 }
