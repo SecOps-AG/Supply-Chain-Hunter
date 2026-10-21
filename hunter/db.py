@@ -31,6 +31,21 @@ def iso(moment: datetime) -> str:
     return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# Schema steps applied after the base tables, in order. PRAGMA user_version records how
+# many have run, so add new steps (ALTER TABLE, new indexes) at the end and never edit old ones.
+MIGRATIONS: tuple[str, ...] = (
+    """
+    CREATE INDEX IF NOT EXISTS releases_created ON releases (created_at);
+    CREATE INDEX IF NOT EXISTS release_jobs_status_created ON release_jobs (status, created_at);
+    CREATE INDEX IF NOT EXISTS investigations_created ON investigations (created_at);
+    CREATE INDEX IF NOT EXISTS analyst_reviews_created ON analyst_reviews (created_at);
+    CREATE INDEX IF NOT EXISTS outbox_status_next ON outbox (status, next_attempt_at);
+    CREATE INDEX IF NOT EXISTS outbox_created ON outbox (created_at);
+    CREATE INDEX IF NOT EXISTS takeover_signals_package_created ON takeover_signals (ecosystem, name, created_at);
+    """,
+)
+
+
 class Database:
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -40,6 +55,7 @@ class Database:
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA busy_timeout=5000")
         self._migrate()
 
     def close(self) -> None:
@@ -324,6 +340,9 @@ class Database:
             """
         )
         self._conn.commit()
+        version = int(self._conn.execute("PRAGMA user_version").fetchone()[0])
+        for step, script in enumerate(MIGRATIONS[version:], start=version + 1):
+            self._conn.executescript(f"BEGIN;\n{script}\nPRAGMA user_version = {step};\nCOMMIT;")
 
     def get_checkpoint(self, ecosystem: str) -> str | None:
         with self._lock:
