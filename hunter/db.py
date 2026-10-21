@@ -95,6 +95,7 @@ class Database:
                 subtype TEXT,
                 payload_json TEXT,
                 created_at TEXT NOT NULL,
+                scored_at TEXT,
                 PRIMARY KEY (ecosystem, name, version)
             );
             CREATE TABLE IF NOT EXISTS outbox (
@@ -339,6 +340,10 @@ class Database:
             );
             """
         )
+        columns = {row[1] for row in self._conn.execute("PRAGMA table_info(releases)")}
+        if "scored_at" not in columns:
+            # When the band last changed; created_at stays the first save.
+            self._conn.execute("ALTER TABLE releases ADD COLUMN scored_at TEXT")
         self._conn.commit()
         version = int(self._conn.execute("PRAGMA user_version").fetchone()[0])
         for step, script in enumerate(MIGRATIONS[version:], start=version + 1):
@@ -478,7 +483,9 @@ class Database:
                 malice_probability = excluded.malice_probability,
                 family = excluded.family,
                 subtype = excluded.subtype,
-                payload_json = excluded.payload_json
+                payload_json = excluded.payload_json,
+                scored_at = CASE WHEN releases.band IS excluded.band
+                    THEN releases.scored_at ELSE excluded.scored_at END
             """
             if replace
             else "ON CONFLICT(ecosystem, name, version) DO NOTHING"
@@ -487,11 +494,12 @@ class Database:
             self._conn.execute(
                 f"""
                 INSERT INTO releases (
-                    ecosystem, name, version, band, malice_probability, family, subtype, payload_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ecosystem, name, version, band, malice_probability, family, subtype, payload_json, created_at,
+                    scored_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 {conflict}
                 """,
-                (ecosystem, name, version, band, probability, family, subtype, payload_json, moment),
+                (ecosystem, name, version, band, probability, family, subtype, payload_json, moment, moment),
             )
             self._conn.commit()
 
@@ -1731,11 +1739,16 @@ class Database:
         return [dict(row) for row in rows]
 
     def ground_truth_releases(self, since: str) -> list[dict]:
-        """npm, PyPI, and Open VSX releases scored at or after `since`, with the confirmed public-alert time if any."""
+        """npm, PyPI, and Open VSX releases first saved at or after `since`, with the confirmed public-alert time if any.
+
+        `scored_at` is when the band last changed (a deferred release re-scored later),
+        or the first save for rows written before that column existed.
+        """
         with self._lock:
             rows = self._conn.execute(
                 """
                 SELECT r.ecosystem, r.name, r.version, r.band, r.payload_json, r.created_at,
+                       COALESCE(r.scored_at, r.created_at) AS scored_at,
                        p.first_seen_at AS confirmed_at
                 FROM releases r
                 LEFT JOIN public_feed_items p

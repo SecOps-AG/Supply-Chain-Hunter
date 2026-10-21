@@ -371,21 +371,22 @@ def _not_found(exc: Exception) -> bool:
     return "not found" in str(exc).lower()
 
 
-def npm_takedown_time(name: str, registry: str, transport: HttpGet = http_get) -> datetime | None:
-    """When npm replaced the package with its 0.0.1-security holder, or None when it has not.
+def npm_takedown_time(name: str, registry: str, transport: HttpGet = http_get) -> tuple[bool, datetime | None]:
+    """Whether npm replaced the package with its 0.0.1-security holder, and when.
 
-    Reads the small version document first; the packument is only read for a holder,
-    which has no other versions left.
+    The time is None when the holder has no `time` entry or the packument is too
+    big to read. Reads the small version document first; the packument is only
+    read for a holder, which has no other versions left.
     """
     base = f"{registry.rstrip('/')}/{quote(name)}"
     try:
         version_doc = json.loads(transport(f"{base}/{NPM_HOLDER_VERSION}", 30).decode("utf-8"))
     except FeedError as exc:
         if _not_found(exc):
-            return None
+            return False, None
         raise
     if not isinstance(version_doc, dict) or version_doc.get("version") != NPM_HOLDER_VERSION:
-        return None
+        return False, None
     blob = transport(base, 30)
     stamp = None
     if len(blob) <= MAX_RECORD_BYTES:
@@ -395,7 +396,7 @@ def npm_takedown_time(name: str, registry: str, transport: HttpGet = http_get) -
             stamp = parse_time(str(times.get(NPM_HOLDER_VERSION) or ""))
     if stamp is not None and stamp.tzinfo is None:
         stamp = stamp.replace(tzinfo=timezone.utc)
-    return stamp or utcnow()
+    return True, stamp
 
 
 def check_npm_takedowns(
@@ -409,8 +410,8 @@ def check_npm_takedowns(
     fetch: bool = True,
     now: datetime | None = None,
     stop: threading.Event | None = None,
-) -> tuple[dict[str, datetime], int, list[str]]:
-    """Takedown times by name, checks made, and errors.
+) -> tuple[dict[str, datetime | None], int, list[str]]:
+    """Takedown times by name (None when npm gives no time), checks made, and errors.
 
     A known takedown is not checked again. Up to `limit` other names are checked
     per run: flagged and never-checked names first, then the longest unchecked.
@@ -423,25 +424,44 @@ def check_npm_takedowns(
     checked = 0
     errors: list[str] = []
     if fetch and limit > 0:
-        due = [name for name in names if not (cache.get(name) or {}).get("takedown_at")]
+        due = [name for name in names if not _cached_takedown(cache.get(name))]
         due.sort(key=lambda name: (name not in flagged, (cache.get(name) or {}).get("checked_at") or "", name))
         for name in due[:limit]:
             if stop is not None and stop.is_set():
                 break
             try:
-                when = npm_takedown_time(name, registry, transport)
+                taken_down, when = npm_takedown_time(name, registry, transport)
             except (FeedError, OSError, ValueError) as exc:
                 errors.append(f"npm {name}: {exc}")
                 continue
             checked += 1
-            cache[name] = {"checked_at": iso(moment), "takedown_at": iso(when) if when else None}
+            cache[name] = {
+                "checked_at": iso(moment),
+                "taken_down": taken_down,
+                "takedown_at": iso(when) if when else None,
+            }
         _write_json(cache_path, cache)
-    found = {}
+    found: dict[str, datetime | None] = {}
     for name in names:
-        stamp = parse_time((cache.get(name) or {}).get("takedown_at"))
-        if stamp is not None:
-            found[name] = stamp
+        entry = cache.get(name) or {}
+        if _cached_takedown(entry):
+            found[name] = _cached_takedown_time(entry)
     return found, checked, errors
+
+
+def _cached_takedown(entry: dict | None) -> bool:
+    entry = entry or {}
+    return bool(entry.get("taken_down") or entry.get("takedown_at"))
+
+
+def _cached_takedown_time(entry: dict) -> datetime | None:
+    stamp = _aware(entry.get("takedown_at"))
+    checked = _aware(entry.get("checked_at"))
+    # Older caches stored the check time when npm gave none; a real takedown
+    # comes before the check.
+    if stamp is not None and checked is not None and stamp >= checked:
+        return None
+    return stamp
 
 
 # ---- report -----------------------------------------------------------------
@@ -585,7 +605,7 @@ def _labels_since(labels: list[dict], since: str) -> list[dict]:
 def build_report(
     releases: list[dict],
     records: list[MalRecord],
-    takedowns: dict[str, datetime],
+    takedowns: dict[str, datetime | None],
     *,
     now: datetime | None = None,
     meta: dict | None = None,
@@ -593,9 +613,11 @@ def build_report(
 ) -> dict:
     """Label each scored release against the ground truth and compute the metrics.
 
-    `releases` rows need ecosystem, name, version, band, created_at and confirmed_at.
-    A release counts as caught when Scout put it in review or alert, or an alert was
-    confirmed. Releases still `deferred` are left out of recall and counted apart.
+    `releases` rows need ecosystem, name, version, band, scored_at (else created_at)
+    and confirmed_at. A release counts as caught when Scout put it in review or alert,
+    or an alert was confirmed. Releases still `deferred` are left out of recall and
+    counted apart. A takedown with no known time labels the release but adds no
+    truth time, so it stays out of time-to-detect unless OSV gives one.
     Open VSX rows are not part of that recall. ``openvsx_labels`` joins them in
     ``openvsx_items``. ``vsx_removed_before_review`` and ``vsx_inactive_before_review``
     count as ``not_reviewed``.
@@ -616,19 +638,20 @@ def build_report(
             continue
         name = normalize_name(ecosystem, str(row["name"]))
         matched = [record for record in by_package.get((ecosystem, name), []) if record.affects(ecosystem, name, version)]
-        takedown = takedowns.get(name) if ecosystem == "npm" else None
-        if not matched and takedown is None:
+        taken_down = ecosystem == "npm" and name in takedowns
+        if not matched and not taken_down:
             continue
         if row.get("band") == "deferred":
             deferred += 1
             continue
         truth_times = [record.published for record in matched if record.published is not None]
         sources = ["osv"] if matched else []
-        if takedown is not None:
-            truth_times.append(takedown)
+        if taken_down:
+            if takedowns[name] is not None:
+                truth_times.append(takedowns[name])
             sources.append("npm_takedown")
         truth_at = min(truth_times) if truth_times else None
-        scored_at = _aware(row.get("created_at"))
+        scored_at = _aware(row.get("scored_at") or row.get("created_at"))
         confirmed_at = _aware(row.get("confirmed_at"))
         confirmed = confirmed_at is not None
         caught = row.get("band") in CAUGHT_BANDS or confirmed
@@ -791,7 +814,8 @@ def run_ground_truth(
     for row in releases:
         if row["ecosystem"] == "npm" and row["version"] == NPM_HOLDER_VERSION:
             stamp = _aware(row.get("created_at"))
-            if stamp is not None and (row["name"] not in takedowns or stamp < takedowns[row["name"]]):
+            known = takedowns.get(row["name"])
+            if stamp is not None and (known is None or stamp < known):
                 takedowns[row["name"]] = stamp
     report = build_report(
         releases,
