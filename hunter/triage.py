@@ -178,6 +178,53 @@ def is_install_script(path: str) -> bool:
     return PurePosixPath(path).name.lower() in INSTALL_NAMES
 
 
+# Python runs these files on every interpreter start once they sit on sys.path.
+STARTUP_HOOK_NAMES = {"sitecustomize.py", "usercustomize.py"}
+# site.py runs a .pth line as code when it starts with "import" and a space or tab.
+_PTH_IMPORT_PREFIX = ("import ", "import\t")
+# The .pth stubs packaging tools write, by file name, with the one import line each tool writes.
+# Every other import line counts; whether it matters is decided by what changed in the release.
+_TOOL_PTH_STUBS = (
+    (re.compile(r"^__editable__\..+\.pth$"), re.compile(r"^import\s+__editable___\w+_finder\s*;")),
+    (re.compile(r"^distutils-precedence\.pth$"), re.compile(r"^import\s+os\s*;.*__import__\(['\"]_distutils_hack['\"]\)")),
+    (re.compile(r"^_virtualenv\.pth$"), re.compile(r"^import\s+_virtualenv\s*$")),
+    (re.compile(r"^.+-nspkg\.pth$"), re.compile(r"^import\s+sys\s*,\s*types\s*,\s*os\s*;")),
+)
+
+
+def _base_name(path: str) -> str:
+    return PurePosixPath(path.replace("\\", "/")).name.lower()
+
+
+def pth_import_lines(path: str, text: str) -> list[tuple[int, str]]:
+    """Lines of a .pth file that Python runs at startup, minus the packaging-tool stubs."""
+    name = _base_name(path)
+    if not name.endswith(".pth") or text.startswith(BINARY_MARKER):
+        return []
+    allowed = [line_rule for name_rule, line_rule in _TOOL_PTH_STUBS if name_rule.match(name)]
+    found: list[tuple[int, str]] = []
+    for number, line in enumerate(text.splitlines(), start=1):
+        if not line.startswith(_PTH_IMPORT_PREFIX):
+            continue
+        if any(rule.match(line.strip()) for rule in allowed):
+            continue
+        found.append((number, line))
+    return found
+
+
+def new_pth_import_lines(path: str, text: str, old_texts: list[str]) -> list[tuple[int, str]]:
+    """Import lines that no old copy of this .pth had. An unchanged hook has none."""
+    old_lines = {line.strip() for old in old_texts for line in old.splitlines()}
+    return [(number, line) for number, line in pth_import_lines(path, text) if line.strip() not in old_lines]
+
+
+def is_startup_hook(path: str, text: str) -> bool:
+    """sitecustomize.py or usercustomize.py with text, or .pth text with a line Python runs at startup."""
+    if _base_name(path) in STARTUP_HOOK_NAMES:
+        return bool(text.strip())
+    return bool(pth_import_lines(path, text))
+
+
 def is_entry_point(path: str) -> bool:
     lowered = path.replace("\\", "/")
     parts = _parts(lowered)
@@ -249,6 +296,8 @@ def categorize(path: str, added: str, new_text: str, is_new_file: bool) -> str |
     if is_workflow(path):
         return "workflows"
     if is_install_script(path):
+        return "install_scripts"
+    if is_startup_hook(path, new_text if is_new_file else added):
         return "install_scripts"
     if is_binary_media(path, new_text) or is_binary_media(path, added):
         return "binary_media"

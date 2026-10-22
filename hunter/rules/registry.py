@@ -66,6 +66,11 @@ PYTHON_RULES = (
              "new runtime dependency that no file in the package loads", newness="rule", source="python"),
     RuleSpec("utf16_code_file", "weak", expand("code,pth,bundle"), "both",
              "code file that became UTF-16 in this release", source="python"),
+    RuleSpec("pth_import_line", "weak", expand("pth"), "pypi",
+             "new or changed .pth import line, which Python runs at every interpreter start", source="python"),
+    RuleSpec("py_startup_hook_file", "weak", expand("py"), "pypi",
+             "new or changed sitecustomize.py or usercustomize.py, which Python runs at every interpreter start",
+             source="python"),
     RuleSpec("h_new_host", "info", expand("code,manifest"), "both",
              "URL host not on the allowlist and not in the old file", comments="skip", source="python"),
 )
