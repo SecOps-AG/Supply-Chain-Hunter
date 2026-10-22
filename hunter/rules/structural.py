@@ -232,6 +232,45 @@ def _startup_hook_file(context: FileContext) -> Iterator[tuple[int, str]]:
         return
 
 
+def _startup_hook_payload(context: FileContext) -> Iterator[tuple[int, str]]:
+    """A new startup hook that loads a module this release adds at the top of site-packages,
+    where that module decodes and runs code or reaches the network.
+
+    A new hook that loads the package's own code, or a new module with none of those, stays weak.
+    """
+    from ..features import (
+        install_target,
+        is_new_install,
+        new_top_level_module,
+        payload_indicators,
+        pth_imported_modules,
+    )
+
+    is_pth = context.path.lower().endswith(".pth")
+    hook_lines = _new_pth_lines(context) if is_pth else _new_hook_lines(context)
+    if not hook_lines:
+        return
+    old_files = dict(context.old_files)
+    new_files = dict(context.new_files)
+    target = install_target(new_files, context.path)
+    if target is None or "/" in target:
+        return
+    if is_pth:
+        for line_no, line in hook_lines:
+            for module in pth_imported_modules(line):
+                for path in new_top_level_module(old_files, new_files, module):
+                    found = payload_indicators(new_files[path])
+                    if found:
+                        yield line_no, f"{line.strip()} -> {path}: {','.join(found)}"
+                        return
+        return
+    if not is_new_install(old_files, target):
+        return
+    found = payload_indicators(context.new)
+    if found:
+        yield hook_lines[0][0], f"{target}: {','.join(found)}"
+
+
 def _new_host(context: FileContext) -> Iterator[tuple[int, str]]:
     for line_no, raw in _matches_outside_comments(context, HOST):
         host = raw.lower().rstrip(".")
@@ -251,6 +290,7 @@ RULES = {
     "h_new_host": _new_host,
     "pth_import_line": _pth_import_line,
     "py_startup_hook_file": _startup_hook_file,
+    "startup_hook_payload": _startup_hook_payload,
 }
 
 

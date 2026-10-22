@@ -71,6 +71,9 @@ PYTHON_RULES = (
     RuleSpec("py_startup_hook_file", "weak", expand("py"), "pypi",
              "new or changed sitecustomize.py or usercustomize.py, which Python runs at every interpreter start",
              source="python"),
+    RuleSpec("startup_hook_payload", "weak", expand("pth,py"), "pypi",
+             "new startup hook that loads a new top-level module which decodes and runs code or reaches the network",
+             source="python"),
     RuleSpec("h_new_host", "info", expand("code,manifest"), "both",
              "URL host not on the allowlist and not in the old file", comments="skip", source="python"),
 )

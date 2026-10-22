@@ -59,6 +59,9 @@ class CodeFeatures:
     behavior_chains: list[str] = field(default_factory=list)
     runtime_behavior_chains: list[str] = field(default_factory=list)
     new_binary: bool = False
+    outside_package_files: list[str] = field(default_factory=list)
+    wheel_only_files: list[str] = field(default_factory=list)
+    build_config_changes: list[str] = field(default_factory=list)
     rule_report: RuleReport | None = None
 
     @property
@@ -81,6 +84,9 @@ class CodeFeatures:
             or self.entrypoint_payload
             or self.install_sidecar
             or self.behavior_chains
+            or self.outside_package_files
+            or self.wheel_only_files
+            or self.build_config_changes
         )
 
     def static_alert(self) -> bool:
@@ -140,6 +146,15 @@ class CodeFeatures:
             signals.append(f"runtime_behavior_chain:{text}")
         if self.new_binary:
             signals.append("new_binary")
+        if self.outside_package_files:
+            shown = ",".join(self.outside_package_files[:6])
+            signals.append(f"outside_package_install:{shown}")
+        if self.wheel_only_files:
+            shown = ",".join(self.wheel_only_files[:6])
+            signals.append(f"wheel_only_file:{shown}")
+        if self.build_config_changes:
+            shown = ",".join(self.build_config_changes[:4])
+            signals.append(f"build_config_change:{shown}")
         if self.rule_report is not None:
             signals.extend(self.rule_report.signals())
         return signals

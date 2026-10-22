@@ -171,10 +171,18 @@ def _over_release_tokens(chunks: list[dict], cap: int) -> bool:
 
 
 def _note_local_signals(state: dict, code: CodeFeatures) -> None:
-    if not code.phantom_runtime_dependencies:
+    notes = []
+    if code.phantom_runtime_dependencies:
+        notes.append("local_signal phantom_runtime_dependency: " + ",".join(code.phantom_runtime_dependencies))
+    if code.outside_package_files:
+        notes.append("local_signal outside_package_install: " + ",".join(code.outside_package_files[:12]))
+    if code.wheel_only_files:
+        notes.append("local_signal wheel_only_file: " + ",".join(code.wheel_only_files[:12]))
+    if code.build_config_changes:
+        notes.append("local_signal build_config_change: " + ",".join(code.build_config_changes[:4]))
+    if not notes:
         return
-    note = "local_signal phantom_runtime_dependency: " + ",".join(code.phantom_runtime_dependencies)
-    state["diff_excerpt"] = (state.get("diff_excerpt") or "") + "\n" + note
+    state["diff_excerpt"] = (state.get("diff_excerpt") or "") + "\n" + "\n".join(notes)
     state["local_signals"] = code.signal_list()
 
 
@@ -234,6 +242,9 @@ _WARNING_PREFIXES = (
     "typosquat_name:",
     "behavior_chain:",
     "runtime_behavior_chain:",
+    "outside_package_install:",
+    "wheel_only_file:",
+    "build_config_change:",
 )
 
 
@@ -257,6 +268,8 @@ _ROUTE_STRUCTURAL_PREFIXES = (
     "dependency_typosquat:",
     "typosquat_name:",
     "behavior_chain:",
+    "outside_package_install:",
+    "build_config_change:",
 )
 # These literals route by themselves when the previous version did not have them.
 _ROUTE_STRONG_LITERALS = frozenset({"literal_decode_exec", "literal_raw_ip", "literal_encoded_import"})
@@ -406,6 +419,7 @@ def _apply_score_floors(code: CodeFeatures, probability: float, head) -> float:
         ("entrypoint_payload", bool(code.entrypoint_payload)),
         ("install_sidecar", bool(code.install_sidecar)),
         ("behavior_chains", bool(code.behavior_chains)),
+        ("outside_package_install", bool(code.outside_package_files)),
     )
     for name, active in checks:
         if not active:
@@ -971,6 +985,13 @@ def _classify_aligned(
         head,
         "behavior_chains",
         bool(code.behavior_chains),
+        band,
+        probability,
+    )
+    band, probability = _floor_keeps_review(
+        head,
+        "outside_package_install",
+        bool(code.outside_package_files),
         band,
         probability,
     )
