@@ -39,6 +39,7 @@ from hunter.webhook import (
     dump_body,
     enqueue_analysis,
     jev_evidence_complete,
+    jev_failure_signal,
     parse_verdict,
     partial_read_reasons,
     partial_read_text,
@@ -91,7 +92,8 @@ def should_investigate(result: Classification) -> bool:
 def jev_passes_complete(result: Classification) -> bool:
     """True when Jev finished, or Scout marked the read partial or unread.
 
-    Static signals and failed Jev passes are incomplete. A Pass C failure is not.
+    Static signals and failed Jev passes are incomplete. A Pass C failure is not,
+    and neither is a failed pass on a release a promoted rule marks malicious.
     """
     if result.band == "deferred" or result.defer_reason:
         return False
@@ -101,8 +103,9 @@ def jev_passes_complete(result: Classification) -> bool:
         "jev_unavailable",
         "jev_retry",
     }
+    strong_rule = result.rule_verdict == "malicious"
     for signal in result.signals:
-        if signal in blocked or signal.startswith("jev_pass_") or signal.startswith("gateway_"):
+        if signal in blocked or (jev_failure_signal(signal) and not strong_rule):
             return False
     return True
 

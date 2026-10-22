@@ -12,6 +12,7 @@ import os
 from hunter import JEV_MODEL_ID
 from hunter.bands import (
     GATE_LOW,
+    REVIEW_FLOOR,
     REVIEW_THRESHOLD,
     decide_band,
 )
@@ -171,10 +172,18 @@ def _over_release_tokens(chunks: list[dict], cap: int) -> bool:
 
 
 def _note_local_signals(state: dict, code: CodeFeatures) -> None:
-    if not code.phantom_runtime_dependencies:
+    notes = []
+    if code.phantom_runtime_dependencies:
+        notes.append("local_signal phantom_runtime_dependency: " + ",".join(code.phantom_runtime_dependencies))
+    if code.outside_package_files:
+        notes.append("local_signal outside_package_install: " + ",".join(code.outside_package_files[:12]))
+    if code.wheel_only_files:
+        notes.append("local_signal wheel_only_file: " + ",".join(code.wheel_only_files[:12]))
+    if code.build_config_changes:
+        notes.append("local_signal build_config_change: " + ",".join(code.build_config_changes[:4]))
+    if not notes:
         return
-    note = "local_signal phantom_runtime_dependency: " + ",".join(code.phantom_runtime_dependencies)
-    state["diff_excerpt"] = (state.get("diff_excerpt") or "") + "\n" + note
+    state["diff_excerpt"] = (state.get("diff_excerpt") or "") + "\n" + "\n".join(notes)
     state["local_signals"] = code.signal_list()
 
 
@@ -234,6 +243,9 @@ _WARNING_PREFIXES = (
     "typosquat_name:",
     "behavior_chain:",
     "runtime_behavior_chain:",
+    "outside_package_install:",
+    "wheel_only_file:",
+    "build_config_change:",
 )
 
 
@@ -257,6 +269,8 @@ _ROUTE_STRUCTURAL_PREFIXES = (
     "dependency_typosquat:",
     "typosquat_name:",
     "behavior_chain:",
+    "outside_package_install:",
+    "build_config_change:",
 )
 # These literals route by themselves when the previous version did not have them.
 _ROUTE_STRONG_LITERALS = frozenset({"literal_decode_exec", "literal_raw_ip", "literal_encoded_import"})
@@ -406,6 +420,7 @@ def _apply_score_floors(code: CodeFeatures, probability: float, head) -> float:
         ("entrypoint_payload", bool(code.entrypoint_payload)),
         ("install_sidecar", bool(code.install_sidecar)),
         ("behavior_chains", bool(code.behavior_chains)),
+        ("outside_package_install", bool(code.outside_package_files)),
     )
     for name, active in checks:
         if not active:
@@ -634,9 +649,24 @@ def classify_files(
         row.rule_verdict = report.verdict
         row.rule_hits = report.hit_dicts()
         row.rule_pack = report.pack_version
+        if report.verdict == "malicious" and decision_model_failed(row):
+            _rule_fallback(row)
         if report.verdict == "malicious" and not classification_incomplete(row):
             row.needs_llm_review = True
     return row
+
+
+def _rule_fallback(row: Classification) -> None:
+    """Scout failed on a release a promoted rule marks malicious. Triage and Analyst read it now.
+
+    The failed-pass signal stays on the row so the alert says Scout did not finish.
+    """
+    row.band = "review"
+    row.malice_probability = round(max(row.malice_probability, REVIEW_FLOOR), 4)
+    row.defer_reason = ""
+    row.signals = [item for item in row.signals if item not in ("ai_incomplete", "jev_retry")]
+    row.signals.append(RULE_FALLBACK_SIGNAL)
+    row.needs_llm_review = True
 
 
 # Signals for the decision-model failure path (rule plan section 6.3).
@@ -645,6 +675,8 @@ BACKUP_SIGNAL = "backup_decision_model"
 CONTEXT_OVERFLOW_SIGNAL = "context_overflow"
 ROUTED_SIGNAL_PREFIX = "routed_context_overflow:"
 MODEL_DOWN_SIGNAL = "decision_model_down"
+# Scout failed and a promoted rule hit, so the release went to Triage and Analyst instead of a retry.
+RULE_FALLBACK_SIGNAL = "jev_failed_rule_fallback"
 SPEND_STOP_REASON = "spend_cap_reached"
 
 
@@ -971,6 +1003,13 @@ def _classify_aligned(
         head,
         "behavior_chains",
         bool(code.behavior_chains),
+        band,
+        probability,
+    )
+    band, probability = _floor_keeps_review(
+        head,
+        "outside_package_install",
+        bool(code.outside_package_files),
         band,
         probability,
     )

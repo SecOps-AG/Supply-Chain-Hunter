@@ -57,7 +57,8 @@
     "install_sidecar": 0.62,
     "behavior_chains": null,
     "jev_consensus": 0.62,
-    "rule_strong": 0.62
+    "rule_strong": 0.62,
+    "outside_package_install": 0.62
   },
   "holdout": {
     "precision": null,

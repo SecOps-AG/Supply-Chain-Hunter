@@ -22,6 +22,7 @@ from hunter.patterns import (
     shannon_entropy,
     unexpected_hosts,
 )
+from hunter.triage import pth_import_lines
 from hunter.typosquat import COMMON_PACKAGES, NameIndex
 
 LIFECYCLE_SCRIPTS = (
@@ -636,6 +637,232 @@ def install_sidecar_change(
     return False
 
 
+# Wheel .data subdirectories that install into site-packages, next to the package.
+_WHEEL_LIB_DATA = re.compile(r"^[^/]+\.data/(?:purelib|platlib)/(.+)$")
+_COMPILED_SUFFIXES = {".so", ".pyd", ".dll", ".dylib", ".pyc", ".pyo", ".a", ".lib", ".mo"}
+_PYTHON_RUN_SUFFIXES = {".py", ".pyw", ".pth"}
+# Files a build backend writes into the wheel that the sdist never holds.
+_GENERATED_NAMES = {"_version.py", "version.py", "__version__.py", "_build_info.py"}
+_GENERATED_ENDINGS = ("_pb2.py", "_pb2_grpc.py")
+_TOML_TABLE = re.compile(r"^\s*\[\[?\s*([^\]]+?)\s*\]\]?\s*(?:#.*)?$")
+_MATURIN_DATA = re.compile(r"^\s*data\s*=")
+
+
+def _wheel_tree(files: dict[str, str]) -> dict[str, str]:
+    """Wheel paths without the wheel/ root. An unprefixed tree counts when it has a .dist-info directory."""
+    wheel = {path[len("wheel/") :]: text for path, text in files.items() if path.startswith("wheel/")}
+    if wheel or any(path.startswith("sdist/") for path in files):
+        return wheel
+    if any(path.split("/", 1)[0].endswith(".dist-info") for path in files):
+        return dict(files)
+    return {}
+
+
+def wheel_install_path(path: str) -> str | None:
+    """Where a wheel file lands under site-packages. None for metadata and other .data directories."""
+    top = path.split("/", 1)[0]
+    if top.endswith(".dist-info"):
+        return None
+    if top.endswith(".data"):
+        match = _WHEEL_LIB_DATA.match(path)
+        return match.group(1) if match else None
+    return path
+
+
+def _install_paths(wheel: dict[str, str]) -> set[str]:
+    return {target for target in (wheel_install_path(path) for path in wheel) if target is not None}
+
+
+def _install_map(files: dict[str, str]) -> dict[str, str]:
+    """Install path to tree path. A tree with no wheel maps as it stands, without the sdist/ root."""
+    wheel = _wheel_tree(files)
+    if not wheel:
+        return {path.removeprefix("sdist/"): path for path in files}
+    prefix = "wheel/" if any(path.startswith("wheel/") for path in files) else ""
+    found: dict[str, str] = {}
+    for path in wheel:
+        target = wheel_install_path(path)
+        if target is not None:
+            found[target] = prefix + path
+    return found
+
+
+def install_target(files: dict[str, str], path: str) -> str | None:
+    """Where one tree path lands under site-packages, or None when it does not install there."""
+    for target, tree_path in _install_map(files).items():
+        if tree_path == path:
+            return target
+    return None
+
+
+def is_new_install(old_files: dict[str, str], target: str) -> bool:
+    """The previous release installed nothing at this path."""
+    return target not in _install_map(old_files)
+
+
+# A startup hook's module that decodes and runs code, or reaches the network, is a payload.
+_PY_RUN = re.compile(r"\b(?:exec|eval)\s*\(")
+_PY_DECODE = re.compile(
+    r"\b(?:b64decode|b32decode|b85decode|a85decode|decompress|unhexlify|fromhex)\s*\("
+    r"|\b(?:marshal|pickle)\.loads\s*\("
+)
+_PY_FETCH = re.compile(
+    r"\b(?:urlopen|urlretrieve|HTTPSConnection|HTTPConnection|create_connection)\s*\("
+    r"|\b(?:requests|httpx)\.(?:get|post|request)\s*\(|\bsocket\.socket\s*\("
+)
+_IMPORT_CALL = re.compile(r"__import__\(\s*['\"]([\w.]+)['\"]")
+
+
+def payload_indicators(text: str) -> list[str]:
+    """decode_exec, fetch_exec, or network, from static text."""
+    found: list[str] = []
+    runs = bool(_PY_RUN.search(text))
+    if runs and _PY_DECODE.search(text):
+        found.append("decode_exec")
+    if _PY_FETCH.search(text):
+        found.append("fetch_exec" if runs else "network")
+    return found
+
+
+def pth_imported_modules(line: str) -> list[str]:
+    """Top-level module names one .pth import line loads."""
+    names: list[str] = []
+    for statement in line.split(";"):
+        statement = statement.strip()
+        if statement.startswith(("import ", "import\t")):
+            parts = [part.strip().split()[0] for part in statement[len("import") :].split(",") if part.strip()]
+        elif statement.startswith("from ") and " import " in statement:
+            parts = [statement[len("from ") :].split(" import ", 1)[0].strip()]
+        else:
+            parts = []
+        parts += _IMPORT_CALL.findall(statement)
+        for part in parts:
+            top = part.split(".", 1)[0]
+            if top and top not in names:
+                names.append(top)
+    return names
+
+
+def new_top_level_module(old_files: dict[str, str], new_files: dict[str, str], module: str) -> list[str]:
+    """Tree paths of a top-level module this release adds next to the package, e.g. in .data/purelib.
+
+    Empty when the previous release already installed a module or directory of that name,
+    so a hook that loads the package's own code does not count.
+    """
+    old_tops = {target.split("/", 1)[0] for target in _install_map(old_files)}
+    if module in old_tops or f"{module}.py" in old_tops:
+        return []
+    return [
+        path
+        for target, path in sorted(_install_map(new_files).items())
+        if target == f"{module}.py" or (target.startswith(f"{module}/") and target.endswith(".py"))
+    ]
+
+
+def _is_own_top(top: str, name: str) -> bool:
+    stem = top
+    for ending in (".py", ".pth", ".libs", "-stubs"):
+        if stem.endswith(ending):
+            stem = stem[: -len(ending)]
+    norm = _norm_pkg(stem).lstrip("-")
+    return bool(norm) and norm == _norm_pkg(name)
+
+
+def outside_package_files(old_files: dict[str, str], new_files: dict[str, str], name: str) -> list[str]:
+    """New wheel files that install a top-level module or directory the previous wheel did not have.
+
+    Wheel .data/purelib and .data/platlib land at the top of site-packages, so they count.
+    Only compared with a previous wheel. The package's own name, compiled extensions,
+    vendored .libs directories, and .pth files with no import line do not count.
+    """
+    new_wheel = _wheel_tree(new_files)
+    old_wheel = _wheel_tree(old_files)
+    if not new_wheel or not old_wheel:
+        return []
+    old_installs = _install_paths(old_wheel)
+    old_tops = {target.split("/", 1)[0] for target in old_installs}
+    found: list[str] = []
+    for path in sorted(new_wheel):
+        target = wheel_install_path(path)
+        if target is None or target in old_installs:
+            continue
+        top = target.split("/", 1)[0]
+        if top in old_tops or _is_own_top(top, name) or top.endswith(".libs"):
+            continue
+        if _path_suffix(target) in _COMPILED_SUFFIXES:
+            continue
+        if target.endswith(".pth") and not pth_import_lines(target, new_wheel[path]):
+            continue
+        found.append(path)
+    return found
+
+
+def _path_suffixes(paths: set[str]) -> set[str]:
+    found: set[str] = set()
+    for path in paths:
+        parts = path.split("/")
+        for index in range(len(parts)):
+            found.add("/".join(parts[index:]))
+    return found
+
+
+def wheel_only_files(old_files: dict[str, str], new_files: dict[str, str]) -> list[str]:
+    """New Python files in the wheel that the sdist of the same release does not hold.
+
+    Only files the previous wheel did not install count. Compiled extensions,
+    generated version and protobuf modules, standard .pth stubs, and non-Python
+    build output do not.
+    """
+    new_wheel = _wheel_tree(new_files)
+    old_wheel = _wheel_tree(old_files)
+    sdist = {path[len("sdist/") :] for path in new_files if path.startswith("sdist/")}
+    if not new_wheel or not old_wheel or not sdist:
+        return []
+    old_installs = _install_paths(old_wheel)
+    in_sdist = _path_suffixes(sdist)
+    found: list[str] = []
+    for path in sorted(new_wheel):
+        target = wheel_install_path(path)
+        if target is None or target in old_installs or _path_suffix(target) not in _PYTHON_RUN_SUFFIXES:
+            continue
+        base = target.rsplit("/", 1)[-1]
+        if base in _GENERATED_NAMES or base.endswith(_GENERATED_ENDINGS):
+            continue
+        if target.endswith(".pth") and not pth_import_lines(target, new_wheel[path]):
+            continue
+        if target in in_sdist:
+            continue
+        found.append(path)
+    return found
+
+
+def _maturin_data_lines(text: str) -> set[str]:
+    table = ""
+    found: set[str] = set()
+    for line in text.splitlines():
+        head = _TOML_TABLE.match(line)
+        if head:
+            table = head.group(1).replace('"', "").replace(" ", "")
+            continue
+        if table == "tool.maturin" and _MATURIN_DATA.match(line):
+            found.add(line.strip())
+    return found
+
+
+def build_config_changes(old_files: dict[str, str], new_files: dict[str, str]) -> list[str]:
+    """A data directory newly added to [tool.maturin]. Its purelib and platlib land in site-packages."""
+    old_lines: set[str] = set()
+    for text in _named(old_files, "pyproject.toml"):
+        old_lines |= _maturin_data_lines(text)
+    found: list[str] = []
+    for text in _named(new_files, "pyproject.toml"):
+        for line in sorted(_maturin_data_lines(text) - old_lines):
+            entry = f"tool.maturin {line}"
+            if entry not in found:
+                found.append(entry)
+    return found
+
+
 def _name_index(popular_names: set[str] | None) -> NameIndex:
     names = set(COMMON_PACKAGES)
     if popular_names:
@@ -725,4 +952,7 @@ def extract_features(
         behavior_chains=behavior_chains,
         runtime_behavior_chains=runtime_behavior_chains,
         new_binary=new_executable_binary(old_files, new_files),
+        outside_package_files=outside_package_files(old_files, new_files, meta.name),
+        wheel_only_files=wheel_only_files(old_files, new_files),
+        build_config_changes=build_config_changes(old_files, new_files),
     )

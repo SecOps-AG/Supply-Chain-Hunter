@@ -43,6 +43,14 @@ class Buffer:
         return self.line_numbers[index], self.lines[index]
 
 
+_VERSION_IN_NAME = re.compile(r"\d+(?:\.\d+)+")
+
+
+def _versionless(name: str) -> str:
+    """File name with version numbers blanked, so protobuf-3.20.2-nspkg.pth matches protobuf-3.20.3-nspkg.pth."""
+    return _VERSION_IN_NAME.sub("#", name)
+
+
 def _whole_file(text: str) -> Buffer:
     lines = text.splitlines()
     return Buffer(lines, list(range(1, len(lines) + 1)))
@@ -151,10 +159,10 @@ class _ReleaseScan:
         if self._old_by_name is None:
             grouped: dict[str, list[str]] = {}
             for old_path in self.old_files:
-                grouped.setdefault(PurePosixPath(old_path).name, []).append(old_path)
+                grouped.setdefault(_versionless(PurePosixPath(old_path).name), []).append(old_path)
             self._old_by_name = grouped
         texts = []
-        for old_path in self._old_by_name.get(PurePosixPath(path).name, []):
+        for old_path in self._old_by_name.get(_versionless(PurePosixPath(path).name), []):
             text = self.old_files[old_path]
             if not text.startswith(BINARY_MARKER):
                 texts.append(text)

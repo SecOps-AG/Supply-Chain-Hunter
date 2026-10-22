@@ -65,6 +65,11 @@
       "floor": "review",
       "test": "tests/test_rules.py::test_rule_hits_its_line[py_exec_decoded]",
       "evidence": "internal rules review, 2026-10-09"
+    },
+    "startup_hook_payload": {
+      "floor": "review",
+      "test": "tests/test_rules.py::test_rule_hits_its_line[startup_hook_payload]",
+      "evidence": "litellm 1.107.0 wheel startup hooks, 2026-10-21"
     }
   }
 }

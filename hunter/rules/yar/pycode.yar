@@ -472,3 +472,23 @@ rule pyproject_backend_path
       )
     )
 }
+
+rule py_daemon_fetch_exec
+{
+  meta:
+    tier = "weak"
+    scope = "py"
+    eco = "pypi"
+    summary = "Python code forks into the background and runs code it downloads."
+  strings:
+    $fork = "os.fork(" ascii
+    $setsid = "os.setsid(" ascii
+    $urlopen = "urlopen(" ascii
+    $req = "requests.get(" ascii
+    $client = "HTTPSConnection(" ascii
+    $exec = "\x65xec(" ascii
+  condition:
+    ($fork or $setsid) and
+    ($urlopen or $req or $client) and
+    $exec
+}

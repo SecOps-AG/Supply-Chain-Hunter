@@ -228,27 +228,38 @@ def signature_header(secret: str, body: bytes) -> str:
     return f"sha256={digest}"
 
 
-def _signals_block_alert(signals: object) -> bool:
+def jev_failure_signal(text: str) -> bool:
+    return text.startswith("jev_pass_") or text.startswith("gateway_")
+
+
+def _signals_block_alert(signals: object, *, strong_rule: bool = False) -> bool:
+    """A failed Jev pass blocks the alert unless a promoted rule already marks the release malicious."""
     if not isinstance(signals, list):
         return False
     for item in signals:
         text = str(item)
-        if text in INCOMPLETE_SIGNALS or text.startswith("jev_pass_") or text.startswith("gateway_"):
+        if text in INCOMPLETE_SIGNALS or (jev_failure_signal(text) and not strong_rule):
             return True
     return False
+
+
+def strong_rule_evidence(evidence: dict) -> bool:
+    return evidence.get("rule_verdict") == "malicious" or bool(top_strong_rule(evidence.get("deterministic_findings")))
 
 
 def jev_evidence_complete(evidence: dict) -> bool:
     """True when Jev finished, or Scout marked the read partial or unread.
 
-    Static rows, deferred rows, and failed Jev passes are never complete.
+    Static rows and deferred rows are never complete. A failed Jev pass is not
+    complete either, unless a promoted rule hit: then Analyst still decides.
     """
-    if evidence.get("jev_complete") is False:
+    strong_rule = strong_rule_evidence(evidence)
+    if evidence.get("jev_complete") is False and not strong_rule:
         return False
     band = str(evidence.get("primary_band") or "")
     if band not in {"alert", "review", "benign"}:
         return False
-    if _signals_block_alert(evidence.get("signals")):
+    if _signals_block_alert(evidence.get("signals"), strong_rule=strong_rule):
         return False
     return True
 

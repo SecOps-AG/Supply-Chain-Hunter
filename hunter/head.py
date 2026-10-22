@@ -21,6 +21,7 @@ BUILTIN_FLOORS = {
     "behavior_chains": REVIEW_FLOOR,
     "jev_consensus": REVIEW_FLOOR,
     "rule_strong": REVIEW_FLOOR,
+    "outside_package_install": REVIEW_FLOOR,
 }
 
 NOUL_FEATURES = (

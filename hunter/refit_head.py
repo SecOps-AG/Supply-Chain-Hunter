@@ -107,6 +107,7 @@ def floor_flags_from_code(code) -> dict[str, bool]:
         "entrypoint_payload": bool(code.entrypoint_payload),
         "install_sidecar": bool(code.install_sidecar),
         "behavior_chains": bool(code.behavior_chains),
+        "outside_package_install": bool(code.outside_package_files),
     }
 
 

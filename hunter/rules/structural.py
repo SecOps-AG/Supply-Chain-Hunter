@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 from ..patterns import HOST
 from ..patterns import _host_allowed as host_allowed
+from ..triage import STARTUP_HOOK_NAMES, new_pth_import_lines
 
 if TYPE_CHECKING:
     from .engine import Buffer
@@ -196,6 +197,80 @@ def _utf16(context: FileContext) -> Iterator[tuple[int, str]]:
         yield 1, "file is UTF-16 encoded"
 
 
+def _base_name(path: str) -> str:
+    return path.replace("\\", "/").rsplit("/", 1)[-1].lower()
+
+
+def _new_pth_lines(context: FileContext) -> list[tuple[int, str]]:
+    """Import lines this .pth gained. A hook the old release shipped unchanged has none."""
+    return new_pth_import_lines(context.path, context.new, context.old_texts)
+
+
+def _new_hook_lines(context: FileContext) -> list[tuple[int, str]]:
+    """Code lines a sitecustomize.py or usercustomize.py gained, new file or edit."""
+    from .engine import is_comment_line
+
+    if _base_name(context.path) not in STARTUP_HOOK_NAMES:
+        return []
+    old_lines = {line.strip() for text in context.old_texts for line in text.splitlines()}
+    found = []
+    for index, line in enumerate(context.buffer.lines):
+        if line.strip() and not is_comment_line(line) and line.strip() not in old_lines:
+            found.append((context.buffer.line_numbers[index], line.strip()))
+    return found
+
+
+def _pth_import_line(context: FileContext) -> Iterator[tuple[int, str]]:
+    for line_no, line in _new_pth_lines(context):
+        yield line_no, line
+        return
+
+
+def _startup_hook_file(context: FileContext) -> Iterator[tuple[int, str]]:
+    for line_no, line in _new_hook_lines(context):
+        yield line_no, f"{_base_name(context.path)}: {line}"
+        return
+
+
+def _startup_hook_payload(context: FileContext) -> Iterator[tuple[int, str]]:
+    """A new startup hook that loads a module this release adds at the top of site-packages,
+    where that module decodes and runs code or reaches the network.
+
+    A new hook that loads the package's own code, or a new module with none of those, stays weak.
+    """
+    from ..features import (
+        install_target,
+        is_new_install,
+        new_top_level_module,
+        payload_indicators,
+        pth_imported_modules,
+    )
+
+    is_pth = context.path.lower().endswith(".pth")
+    hook_lines = _new_pth_lines(context) if is_pth else _new_hook_lines(context)
+    if not hook_lines:
+        return
+    old_files = dict(context.old_files)
+    new_files = dict(context.new_files)
+    target = install_target(new_files, context.path)
+    if target is None or "/" in target:
+        return
+    if is_pth:
+        for line_no, line in hook_lines:
+            for module in pth_imported_modules(line):
+                for path in new_top_level_module(old_files, new_files, module):
+                    found = payload_indicators(new_files[path])
+                    if found:
+                        yield line_no, f"{line.strip()} -> {path}: {','.join(found)}"
+                        return
+        return
+    if not is_new_install(old_files, target):
+        return
+    found = payload_indicators(context.new)
+    if found:
+        yield hook_lines[0][0], f"{target}: {','.join(found)}"
+
+
 def _new_host(context: FileContext) -> Iterator[tuple[int, str]]:
     for line_no, raw in _matches_outside_comments(context, HOST):
         host = raw.lower().rstrip(".")
@@ -213,6 +288,9 @@ RULES = {
     "utf16_code_file": _utf16,
     "npm_phantom_dependency": _phantom_dependency,
     "h_new_host": _new_host,
+    "pth_import_line": _pth_import_line,
+    "py_startup_hook_file": _startup_hook_file,
+    "startup_hook_payload": _startup_hook_payload,
 }
 
 
