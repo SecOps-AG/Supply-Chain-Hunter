@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pytest
 
 from hunter.bands import ALERT_THRESHOLD, REVIEW_FLOOR
-from hunter.classify import classify_files
-from hunter.fake_jev import KeywordJev
+from hunter.classify import RULE_FALLBACK_SIGNAL, classification_incomplete, classify_files
+from hunter.config import Config
+from hunter.db import NEVER_PARK_RANK, Database, utcnow
+from hunter.fake_jev import KeywordJev, RaisingJev
 from hunter.features import (
     build_config_changes,
     extract_features,
@@ -16,9 +20,13 @@ from hunter.features import (
     wheel_only_files,
 )
 from hunter.head import load_head
+from hunter.investigate import build_evidence, jev_passes_complete, should_investigate
+from hunter.jev import JevUnavailable
 from hunter.models import ReleaseMeta
 from hunter.rules import scan_release
+from hunter.service import classify_job
 from hunter.triage import categorize, diff_trees, pth_import_lines
+from hunter.webhook import jev_evidence_complete, should_deliver_analysis
 
 OLD_PYPROJECT = (
     '[build-system]\nrequires = ["maturin>=1.5"]\nbuild-backend = "maturin"\n\n'
@@ -458,3 +466,134 @@ def test_pth_import_parsing_and_payload_indicators():
     assert payload_indicators(SITECUSTOMIZE) == ["fetch_exec"]
     assert payload_indicators("import socket\ns = socket.socket()\n") == ["network"]
     assert payload_indicators("import json\nexec(compile(json.loads(t), 'x', 'exec'))\n") == []
+
+
+# Scout failure on a release a promoted rule marks malicious: Analyst decides, no silent block.
+
+
+class _MemoryLoader:
+    def __init__(self, meta, old_files, new_files):
+        self.meta = meta
+        self.old_files = old_files
+        self.new_files = new_files
+
+    def load(self, ecosystem, name, version, rank):
+        return self.old_files, self.new_files, self.meta
+
+
+def _down_row(monkeypatch, jev=None):
+    monkeypatch.setenv("HUNTER_RULES", "on")
+    old, new = litellm_trees()
+    return classify_files(meta=_meta(), old_files=old, new_files=new, jev=jev or RaisingJev(), head=load_head())
+
+
+def test_failed_scout_with_a_strong_rule_goes_to_analyst_instead_of_retrying(monkeypatch):
+    row = _down_row(monkeypatch)
+    assert row.band == "review"
+    assert RULE_FALLBACK_SIGNAL in row.signals
+    assert any(item.startswith("jev_pass_") for item in row.signals)
+    assert not classification_incomplete(row)
+    assert should_investigate(row)
+    assert jev_passes_complete(row)
+    evidence = build_evidence(row)
+    assert jev_evidence_complete(evidence)
+    assert should_deliver_analysis(evidence, "malicious", confirmed_by="analyst")
+    assert not should_deliver_analysis(evidence, "malicious", confirmed_by="triage")
+    assert not should_deliver_analysis(evidence, "uncertain", confirmed_by="analyst")
+
+
+def test_failed_scout_without_a_rule_hit_still_defers(monkeypatch):
+    monkeypatch.delenv("HUNTER_RULES", raising=False)
+    old, new = litellm_trees()
+    row = classify_files(meta=_meta(), old_files=old, new_files=new, jev=RaisingJev(), head=load_head())
+    assert row.band == "deferred"
+    assert RULE_FALLBACK_SIGNAL not in row.signals
+    assert classification_incomplete(row)
+
+
+def test_spend_stop_is_not_a_failure_and_stays_deferred(monkeypatch):
+    class SpendStop:
+        model = "jev-1.13.0"
+
+        def system_one(self, state, questions):
+            raise JevUnavailable("spend_cap_reached")
+
+    row = _down_row(monkeypatch, SpendStop())
+    assert row.band == "deferred"
+    assert RULE_FALLBACK_SIGNAL not in row.signals
+
+
+def test_jev_failure_signals_block_only_without_a_strong_rule():
+    base = {"primary_band": "review", "jev_complete": False, "signals": ["jev_pass_b_failed", "gateway_503"]}
+    assert not jev_evidence_complete(base)
+    assert jev_evidence_complete({**base, "rule_verdict": "malicious"})
+    strong = [{"rule": "startup_hook_payload", "tier": "strong", "path": "x.pth", "line": 1}]
+    assert jev_evidence_complete({**base, "deterministic_findings": strong})
+    weak = [{"rule": "h_shell", "tier": "weak", "path": "x.py", "line": 1}]
+    assert not jev_evidence_complete({**base, "rule_verdict": "unsure", "deterministic_findings": weak})
+    incomplete = {**base, "rule_verdict": "malicious", "signals": ["ai_incomplete", "jev_retry"]}
+    assert not jev_evidence_complete(incomplete)
+    assert not jev_evidence_complete({**base, "rule_verdict": "malicious", "primary_band": "deferred"})
+
+
+def test_classify_job_queues_triage_for_a_rule_backed_release_when_scout_is_down(monkeypatch, tmp_path):
+    monkeypatch.setenv("HUNTER_RULES", "on")
+    old, new = litellm_trees()
+    meta = _meta()
+    db = Database(tmp_path / "hunter.sqlite3")
+    config = Config(db_path=db.path, inspect_dependencies=False, investigate_url="https://triage.example.invalid/x")
+    assert db.enqueue_job(meta.ecosystem, meta.name, meta.new_version, meta.rank)
+    classify_job(db, config, db.pending_jobs()[0], jev=RaisingJev(), loader=_MemoryLoader(meta, old, new))
+    stored = db.get_release(meta.ecosystem, meta.name, meta.new_version)
+    assert stored["band"] == "review"
+    assert RULE_FALLBACK_SIGNAL in stored["payload_json"]
+    assert db.investigation_depth() == 1
+    assert db.retry_depth() == 0
+
+
+# Top ranked releases keep retrying instead of being parked for a human.
+
+
+def _fail(db, rank, when, times):
+    status = ""
+    for _ in range(times):
+        status = db.note_classify_failure(
+            "pypi", "litellm", "1.107.0", rank, "jev_pass_b_failed", reason="jev_pass_b_failed",
+            max_attempts=5, when=when,
+        )
+    return status
+
+
+@pytest.mark.parametrize("rank", [1, 40, NEVER_PARK_RANK])
+def test_top_ranked_release_is_never_parked(tmp_path, rank):
+    db = Database(tmp_path / "hunter.sqlite3")
+    when = utcnow().replace(microsecond=0)
+    assert _fail(db, rank, when, 12) == "retrying"
+    assert db.retry_depth() == 1
+    assert db.human_review_depth() == 0
+    due = db.due_classify_retries(when + timedelta(hours=2))
+    assert [row["name"] for row in due] == ["litellm"]
+
+
+@pytest.mark.parametrize("rank", [None, 0, NEVER_PARK_RANK + 1])
+def test_other_releases_still_park_after_the_attempt_limit(tmp_path, rank):
+    db = Database(tmp_path / "hunter.sqlite3")
+    when = utcnow().replace(microsecond=0)
+    assert _fail(db, rank, when, 5) == "exhausted"
+    assert db.retry_depth() == 0
+
+
+def test_a_parked_top_ranked_release_starts_retrying_again(tmp_path):
+    db = Database(tmp_path / "hunter.sqlite3")
+    when = utcnow().replace(microsecond=0)
+    assert _fail(db, None, when, 5) == "exhausted"
+    assert _fail(db, 40, when, 1) == "retrying"
+    assert db.retry_depth() == 1
+
+
+def test_a_pth_renamed_only_by_its_version_is_not_new():
+    stub = "import sys, types, os;has_mfs = sys.version_info > (3, 5);p = os.path.join(sys._getframe(1).f_locals['sitedir'], *('google',))\n"
+    old = {"wheel/protobuf-3.20.2-nspkg.pth": stub}
+    new = {"wheel/protobuf-3.20.3-nspkg.pth": stub}
+    report = scan_release(old, new, ecosystem="pypi")
+    assert not [hit for hit in report.hits if hit.path.endswith(".pth")]

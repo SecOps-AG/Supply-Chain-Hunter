@@ -13,6 +13,20 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+# Releases of the top ranked packages are never parked: they keep retrying until Scout answers.
+NEVER_PARK_RANK = 300
+# Longest classify retry wait, in seconds.
+RETRY_DELAY_CAP = 3600
+
+
+def never_park(rank: int | None) -> bool:
+    return rank is not None and 0 < int(rank) <= NEVER_PARK_RANK
+
+
+def _retry_delay(exponent: int) -> int:
+    return min(RETRY_DELAY_CAP, 2 ** min(max(exponent, 0), 12))
+
+
 def iso(moment: datetime) -> str:
     return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -780,9 +794,9 @@ class Database:
                 (ecosystem, name, version),
             ).fetchone()
             attempts = int(row["attempts"]) if row else 0
-            if attempts >= 5:
+            if attempts >= 5 and not never_park(rank):
                 return
-            delay = min(3600, 2 ** max(attempts, 0))
+            delay = _retry_delay(attempts)
             nxt = moment + timedelta(seconds=delay)
             self._conn.execute(
                 """
@@ -818,7 +832,7 @@ class Database:
         with self._lock:
             row = self._conn.execute(
                 """
-                SELECT attempts FROM classify_retries
+                SELECT attempts, rank FROM classify_retries
                 WHERE ecosystem = ? AND name = ? AND version = ?
                 """,
                 (ecosystem, name, version),
@@ -826,8 +840,8 @@ class Database:
             if row is None:
                 return
             attempts = int(row["attempts"]) + 1
-            delay = min(3600, 2 ** max(attempts, 0))
-            status = "pending" if attempts < 5 else "exhausted"
+            delay = _retry_delay(attempts)
+            status = "pending" if attempts < 5 or never_park(row["rank"]) else "exhausted"
             nxt = moment + timedelta(seconds=delay)
             self._conn.execute(
                 """
@@ -872,7 +886,10 @@ class Database:
         max_attempts: int = 5,
         when: datetime | None = None,
     ) -> str:
-        """Record one failed classify attempt. Returns `retrying` or `exhausted`."""
+        """Record one failed classify attempt. Returns `retrying` or `exhausted`.
+
+        A top ranked release (see NEVER_PARK_RANK) is never exhausted: it keeps retrying.
+        """
         moment = when or utcnow()
         limit = max(1, int(max_attempts))
         with self._lock:
@@ -883,11 +900,12 @@ class Database:
                 """,
                 (ecosystem, name, version),
             ).fetchone()
-            if row is not None and str(row["status"]) == "exhausted":
+            keep = never_park(rank)
+            if row is not None and str(row["status"]) == "exhausted" and not keep:
                 return "exhausted"
             attempts = (int(row["attempts"]) if row else 0) + 1
-            status = "exhausted" if attempts >= limit else "retrying"
-            delay = min(3600, 2 ** max(attempts - 1, 0))
+            status = "exhausted" if attempts >= limit and not keep else "retrying"
+            delay = _retry_delay(attempts - 1)
             nxt = moment + timedelta(seconds=delay)
             self._conn.execute(
                 """

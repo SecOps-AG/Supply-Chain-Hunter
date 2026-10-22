@@ -12,6 +12,7 @@ import os
 from hunter import JEV_MODEL_ID
 from hunter.bands import (
     GATE_LOW,
+    REVIEW_FLOOR,
     REVIEW_THRESHOLD,
     decide_band,
 )
@@ -648,9 +649,24 @@ def classify_files(
         row.rule_verdict = report.verdict
         row.rule_hits = report.hit_dicts()
         row.rule_pack = report.pack_version
+        if report.verdict == "malicious" and decision_model_failed(row):
+            _rule_fallback(row)
         if report.verdict == "malicious" and not classification_incomplete(row):
             row.needs_llm_review = True
     return row
+
+
+def _rule_fallback(row: Classification) -> None:
+    """Scout failed on a release a promoted rule marks malicious. Triage and Analyst read it now.
+
+    The failed-pass signal stays on the row so the alert says Scout did not finish.
+    """
+    row.band = "review"
+    row.malice_probability = round(max(row.malice_probability, REVIEW_FLOOR), 4)
+    row.defer_reason = ""
+    row.signals = [item for item in row.signals if item not in ("ai_incomplete", "jev_retry")]
+    row.signals.append(RULE_FALLBACK_SIGNAL)
+    row.needs_llm_review = True
 
 
 # Signals for the decision-model failure path (rule plan section 6.3).
@@ -659,6 +675,8 @@ BACKUP_SIGNAL = "backup_decision_model"
 CONTEXT_OVERFLOW_SIGNAL = "context_overflow"
 ROUTED_SIGNAL_PREFIX = "routed_context_overflow:"
 MODEL_DOWN_SIGNAL = "decision_model_down"
+# Scout failed and a promoted rule hit, so the release went to Triage and Analyst instead of a retry.
+RULE_FALLBACK_SIGNAL = "jev_failed_rule_fallback"
 SPEND_STOP_REASON = "spend_cap_reached"
 
 
