@@ -31,6 +31,21 @@ def iso(moment: datetime) -> str:
     return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# Schema steps applied after the base tables, in order. PRAGMA user_version records how
+# many have run, so add new steps (ALTER TABLE, new indexes) at the end and never edit old ones.
+MIGRATIONS: tuple[str, ...] = (
+    """
+    CREATE INDEX IF NOT EXISTS releases_created ON releases (created_at);
+    CREATE INDEX IF NOT EXISTS release_jobs_status_created ON release_jobs (status, created_at);
+    CREATE INDEX IF NOT EXISTS investigations_created ON investigations (created_at);
+    CREATE INDEX IF NOT EXISTS analyst_reviews_created ON analyst_reviews (created_at);
+    CREATE INDEX IF NOT EXISTS outbox_status_next ON outbox (status, next_attempt_at);
+    CREATE INDEX IF NOT EXISTS outbox_created ON outbox (created_at);
+    CREATE INDEX IF NOT EXISTS takeover_signals_package_created ON takeover_signals (ecosystem, name, created_at);
+    """,
+)
+
+
 class Database:
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -40,6 +55,7 @@ class Database:
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA busy_timeout=5000")
         self._migrate()
 
     def close(self) -> None:
@@ -79,6 +95,7 @@ class Database:
                 subtype TEXT,
                 payload_json TEXT,
                 created_at TEXT NOT NULL,
+                scored_at TEXT,
                 PRIMARY KEY (ecosystem, name, version)
             );
             CREATE TABLE IF NOT EXISTS outbox (
@@ -306,6 +323,8 @@ class Database:
                 detail_json TEXT NOT NULL,
                 error TEXT,
                 created_at TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 1,
+                retry_at TEXT,
                 PRIMARY KEY (ecosystem, name, version)
             );
             CREATE TABLE IF NOT EXISTS mcp_risk (
@@ -323,7 +342,19 @@ class Database:
             );
             """
         )
+        columns = {row[1] for row in self._conn.execute("PRAGMA table_info(releases)")}
+        if "scored_at" not in columns:
+            # When the band last changed; created_at stays the first save.
+            self._conn.execute("ALTER TABLE releases ADD COLUMN scored_at TEXT")
+        columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(takeover_signals)")}
+        if "attempts" not in columns:
+            self._conn.execute("ALTER TABLE takeover_signals ADD COLUMN attempts INTEGER NOT NULL DEFAULT 1")
+        if "retry_at" not in columns:
+            self._conn.execute("ALTER TABLE takeover_signals ADD COLUMN retry_at TEXT")
         self._conn.commit()
+        version = int(self._conn.execute("PRAGMA user_version").fetchone()[0])
+        for step, script in enumerate(MIGRATIONS[version:], start=version + 1):
+            self._conn.executescript(f"BEGIN;\n{script}\nPRAGMA user_version = {step};\nCOMMIT;")
 
     def get_checkpoint(self, ecosystem: str) -> str | None:
         with self._lock:
@@ -459,7 +490,9 @@ class Database:
                 malice_probability = excluded.malice_probability,
                 family = excluded.family,
                 subtype = excluded.subtype,
-                payload_json = excluded.payload_json
+                payload_json = excluded.payload_json,
+                scored_at = CASE WHEN releases.band IS excluded.band
+                    THEN releases.scored_at ELSE excluded.scored_at END
             """
             if replace
             else "ON CONFLICT(ecosystem, name, version) DO NOTHING"
@@ -468,11 +501,12 @@ class Database:
             self._conn.execute(
                 f"""
                 INSERT INTO releases (
-                    ecosystem, name, version, band, malice_probability, family, subtype, payload_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ecosystem, name, version, band, malice_probability, family, subtype, payload_json, created_at,
+                    scored_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 {conflict}
                 """,
-                (ecosystem, name, version, band, probability, family, subtype, payload_json, moment),
+                (ecosystem, name, version, band, probability, family, subtype, payload_json, moment, moment),
             )
             self._conn.commit()
 
@@ -685,22 +719,29 @@ class Database:
             ).fetchall()
         return list(rows)
 
-    def unscored_pending_jobs(self, ecosystems: tuple[str, ...], limit: int = 50) -> list[sqlite3.Row]:
-        """Pending jobs with no takeover-signal row yet, in queue order."""
+    def unscored_pending_jobs(
+        self, ecosystems: tuple[str, ...], limit: int = 50, now: datetime | None = None
+    ) -> list[sqlite3.Row]:
+        """Pending jobs with no takeover-signal row yet or a retry that is due, newest first.
+
+        Under a backlog the newest releases, the likely live attacks, are scored first.
+        """
         if not ecosystems or limit <= 0:
             return []
         marks = ",".join("?" for _ in ecosystems)
         with self._lock:
             rows = self._conn.execute(
                 f"""
-                SELECT j.ecosystem, j.name, j.version, j.rank FROM release_jobs AS j
+                SELECT j.ecosystem, j.name, j.version, j.rank, COALESCE(t.attempts, 0) AS attempts
+                FROM release_jobs AS j
                 LEFT JOIN takeover_signals AS t
                     ON t.ecosystem = j.ecosystem AND t.name = j.name AND t.version = j.version
-                WHERE j.status = 'pending' AND t.name IS NULL AND j.ecosystem IN ({marks})
-                ORDER BY j.created_at, j.ecosystem, j.name, j.version
+                WHERE j.status = 'pending' AND j.ecosystem IN ({marks})
+                    AND (t.name IS NULL OR (t.retry_at IS NOT NULL AND t.retry_at <= ?))
+                ORDER BY j.created_at DESC, j.ecosystem, j.name, j.version
                 LIMIT ?
                 """,
-                (*ecosystems, limit),
+                (*ecosystems, iso(now or utcnow()), limit),
             ).fetchall()
         return list(rows)
 
@@ -716,21 +757,26 @@ class Database:
         old_version: str | None = None,
         error: str = "",
         when: datetime | None = None,
+        retry_at: datetime | None = None,
     ) -> None:
+        """`retry_at` marks a transient read failure to score again; each save counts an attempt."""
         moment = iso(when or utcnow())
         with self._lock:
             self._conn.execute(
                 """
                 INSERT INTO takeover_signals (
-                    ecosystem, name, version, old_version, score, signals_json, detail_json, error, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ecosystem, name, version, old_version, score, signals_json, detail_json, error, created_at,
+                    attempts, retry_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
                 ON CONFLICT(ecosystem, name, version) DO UPDATE SET
                     old_version = excluded.old_version,
                     score = excluded.score,
                     signals_json = excluded.signals_json,
                     detail_json = excluded.detail_json,
                     error = excluded.error,
-                    created_at = excluded.created_at
+                    created_at = excluded.created_at,
+                    attempts = takeover_signals.attempts + 1,
+                    retry_at = excluded.retry_at
                 """,
                 (
                     ecosystem,
@@ -742,6 +788,7 @@ class Database:
                     json.dumps(detail, sort_keys=True, default=str),
                     error or None,
                     moment,
+                    iso(retry_at) if retry_at is not None else None,
                 ),
             )
             self._conn.commit()
@@ -1712,11 +1759,16 @@ class Database:
         return [dict(row) for row in rows]
 
     def ground_truth_releases(self, since: str) -> list[dict]:
-        """npm, PyPI, and Open VSX releases scored at or after `since`, with the confirmed public-alert time if any."""
+        """npm, PyPI, and Open VSX releases first saved at or after `since`, with the confirmed public-alert time if any.
+
+        `scored_at` is when the band last changed (a deferred release re-scored later),
+        or the first save for rows written before that column existed.
+        """
         with self._lock:
             rows = self._conn.execute(
                 """
                 SELECT r.ecosystem, r.name, r.version, r.band, r.payload_json, r.created_at,
+                       COALESCE(r.scored_at, r.created_at) AS scored_at,
                        p.first_seen_at AS confirmed_at
                 FROM releases r
                 LEFT JOIN public_feed_items p

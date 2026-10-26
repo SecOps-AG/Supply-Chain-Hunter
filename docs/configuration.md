@@ -165,7 +165,7 @@ How releases are labeled:
 
 - **Malicious**: an OSV `MAL-` record lists the version or a range covers it, or the npm package was taken down (every version Hunter saw counts).
 - **Caught**: Scout put it in `review` or `alert`, or an alert was confirmed. **Confirmed** counts only confirmed alerts. Releases still `deferred` are left out and counted apart.
-- **Time-to-detect**: Hunter's flag time (Scout score time, or the confirmed-alert time) minus the earliest `MAL-` `published` time or takedown time, in hours. Negative means Hunter was first; `hunter_first` counts those.
+- **Time-to-detect**: Hunter's flag time (when Scout last changed the band, so a deferred release re-scored later counts from the re-score, or the confirmed-alert time) minus the earliest `MAL-` `published` time or takedown time, in hours. Negative means Hunter was first; `hunter_first` counts those. A takedown whose holder has no time still labels the release but gives no truth time, so it stays out of time-to-detect unless OSV has one.
 
 The summary has `malicious_seen`, `caught`, `missed`, `recall`, `confirmed`, `confirmed_recall`, time-to-detect stats (count, median, p90, mean, min, max), and the same counts per ecosystem and per source.
 
@@ -238,7 +238,7 @@ Off by default. With `HUNTER_TAKEOVER_SIGNALS=on`, Hunter reads registry metadat
 | Variable | Default | What it does |
 | --- | --- | --- |
 | `HUNTER_TAKEOVER_SIGNALS` | off | `on` records the signals and orders the classify queue by them. |
-| `HUNTER_TAKEOVER_BATCH` | `50` | Most pending releases scored per classify round. |
+| `HUNTER_TAKEOVER_BATCH` | `50` | Most pending releases scored per pass, newest first. `hunter serve` scores on its own thread, so registry reads never hold up classify. |
 | `HUNTER_TAKEOVER_DORMANT_DAYS` | `365` | Days without a release before a new one counts as a dormant publish. `0` turns it off. |
 | `HUNTER_TAKEOVER_MAJOR_JUMP` | `2` | Major-version step that counts as a semver jump. `0` turns it off. |
 | `HUNTER_TAKEOVER_BURST_COUNT` | `5` | Versions inside the burst window that count as burst publishing. `0` turns it off. |

@@ -2,14 +2,18 @@
 
 import base64
 import json
+import sqlite3
+import threading
 import urllib.error
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
+from hunter import takeover
 from hunter.config import Config
 from hunter.db import Database
-from hunter.registry import FeedError
-from hunter.service import drain_jobs, health_payload
+from hunter.registry import DownloadTooLarge, FeedError
+from hunter.service import _takeover_loop, drain_jobs, drain_until_idle, health_payload
 from hunter.takeover import (
+    PROVENANCE_FILES,
     Thresholds,
     WEIGHTS,
     npm_provenance_identity,
@@ -319,3 +323,165 @@ def test_drain_jobs_takes_the_highest_score_first_only_when_enabled(tmp_path, mo
     db.enqueue_job("npm", "b", "1", 1)
     db.save_takeover_signals("npm", "b", "1", 40, ["provenance_lost"], {})
     assert [row["name"] for row in db.pending_jobs(limit=1)] == ["a"]
+
+
+def _due_now(monkeypatch) -> None:
+    monkeypatch.setattr(takeover, "RETRY_DELAY", timedelta(seconds=-1))
+
+
+def test_a_transient_packument_failure_is_retried_until_the_attempt_limit(tmp_path, monkeypatch):
+    _due_now(monkeypatch)
+    config = _config(tmp_path)
+    db = Database(config.db_path)
+    db.enqueue_job("npm", "flaky", "1.0.1", 1)
+    http = FakeHttp({}, fail={f"{NPM}/flaky"})
+    for attempt in range(1, takeover.MAX_ATTEMPTS + 1):
+        assert score_pending_jobs(db, config, http) == 1
+        stored = db.takeover_signals("npm", "flaky", "1.0.1")
+        assert stored["attempts"] == attempt and stored["error"].startswith("metadata")
+    assert stored["retry_at"] is None
+    assert score_pending_jobs(db, config, http) == 0
+
+
+def test_a_transient_failure_waits_for_its_retry_time_then_recovers(tmp_path, monkeypatch):
+    config = _config(tmp_path)
+    db = Database(config.db_path)
+    db.enqueue_job("npm", "flaky", "1.0.1", 1)
+    http = FakeHttp({f"{NPM}/flaky": _npm_doc(new_user=("mallory", "m@evil.test"))}, fail={f"{NPM}/flaky"})
+    assert score_pending_jobs(db, config, http) == 1
+    assert db.takeover_signals("npm", "flaky", "1.0.1")["retry_at"] is not None
+    assert score_pending_jobs(db, config, http) == 0
+    later = datetime.now(timezone.utc) + takeover.RETRY_DELAY + timedelta(minutes=1)
+    assert [row["name"] for row in db.unscored_pending_jobs(("npm",), now=later)] == ["flaky"]
+
+    _due_now(monkeypatch)
+    db.save_takeover_signals("npm", "flaky", "1.0.1", 0, [], {}, error="metadata: reset", retry_at=datetime(2020, 1, 1))
+    http.fail.clear()
+    assert score_pending_jobs(db, config, http) == 1
+    stored = db.takeover_signals("npm", "flaky", "1.0.1")
+    assert stored["signals"] == ["publisher_new"] and stored["error"] is None and stored["retry_at"] is None
+    assert score_pending_jobs(db, config, http) == 0
+
+
+def test_a_provenance_timeout_keeps_the_partial_score_and_is_retried(tmp_path, monkeypatch):
+    _due_now(monkeypatch)
+    config = _config(tmp_path)
+    db = Database(config.db_path)
+    db.enqueue_job("npm", "widget", "1.0.1", 1)
+    http = FakeHttp(
+        {f"{NPM}/widget": _npm_doc(new_user=("mallory", "m@evil.test"))}, fail={_att_url("widget", "1.0.0")}
+    )
+    score_pending_jobs(db, config, http)
+    stored = db.takeover_signals("npm", "widget", "1.0.1")
+    assert stored["signals"] == ["publisher_new"] and stored["retry_at"] is not None
+    assert score_pending_jobs(db, config, http) == 1
+
+
+class SizedHttp(FakeHttp):
+    """Honours max_bytes like http_get does."""
+
+    def __call__(self, url: str, timeout: float = 60.0, *, max_bytes: int | None = None) -> bytes:
+        body = super().__call__(url, timeout)
+        if max_bytes is not None and len(body) > max_bytes:
+            raise DownloadTooLarge(f"package exceeds {max_bytes} bytes")
+        self.caps = getattr(self, "caps", []) + [max_bytes]
+        return body
+
+
+def test_an_oversized_document_is_final_for_capped_and_plain_transports(tmp_path, monkeypatch):
+    _due_now(monkeypatch)
+    monkeypatch.setattr(takeover, "DOCUMENT_MAX_BYTES", 64)
+    config = _config(tmp_path)
+    for http in (FakeHttp({f"{NPM}/big": _npm_doc()}), SizedHttp({f"{NPM}/big": _npm_doc()})):
+        db = Database(tmp_path / f"{type(http).__name__}.sqlite3")
+        db.enqueue_job("npm", "big", "1.0.1", 1)
+        assert score_pending_jobs(db, config, http) == 1
+        stored = db.takeover_signals("npm", "big", "1.0.1")
+        assert "64 bytes" in stored["error"] and stored["retry_at"] is None
+        assert score_pending_jobs(db, config, http) == 0
+
+
+def test_every_read_passes_a_size_cap(tmp_path):
+    config = _config(tmp_path)
+    db = Database(config.db_path)
+    db.enqueue_job("npm", "widget", "1.0.1", 1)
+    http = SizedHttp({f"{NPM}/widget": _npm_doc(), _att_url("widget", "1.0.0"): _attestation("org/widget")})
+    score_pending_jobs(db, config, http)
+    assert http.caps == [takeover.DOCUMENT_MAX_BYTES, takeover.SMALL_MAX_BYTES]
+
+
+def test_pypi_provenance_checks_a_bounded_number_of_files_sdist_first():
+    wheels = [
+        {
+            "filename": f"pkg-1.0.0-cp3{n}-none-any.whl",
+            "packagetype": "bdist_wheel",
+            "upload_time_iso_8601": "2026-09-01T00:00:00Z",
+        }
+        for n in range(39)
+    ]
+    sdist = {"filename": "pkg-1.0.0.tar.gz", "packagetype": "sdist", "upload_time_iso_8601": "2026-09-01T00:00:00Z"}
+    document = _pypi_doc()
+    document["releases"]["1.0.0"] = [*wheels, sdist]
+    http = _pypi_http()
+    found = pypi_signals(document, "pkg", "1.0.1", transport=http, pypi_base=PYPI)
+    checked = [url for url in http.calls if url.startswith(INTEGRITY)]
+    assert len(checked) == PROVENANCE_FILES
+    assert checked[0] == f"{INTEGRITY}/pkg/1.0.0/pkg-1.0.0.tar.gz/provenance"
+    assert found.signals == [] and found.error == ""
+
+
+def test_backlog_is_scored_newest_first(tmp_path):
+    config = _config(tmp_path, takeover_batch=1)
+    db = Database(config.db_path)
+    for second, name in enumerate(("old", "mid", "new"), start=1):
+        db.enqueue_job("npm", name, "1.0.1", 1, when=datetime(2026, 10, 1, 0, 0, second, tzinfo=timezone.utc))
+    http = FakeHttp({f"{NPM}/{name}": _npm_doc() for name in ("old", "mid", "new")})
+    score_pending_jobs(db, config, http)
+    assert http.calls[0] == f"{NPM}/new"
+    assert db.takeover_signals("npm", "old", "1.0.1") is None and db.takeover_signals("npm", "mid", "1.0.1") is None
+
+
+def test_a_database_from_before_the_retry_columns_is_upgraded(tmp_path):
+    path = tmp_path / "h.sqlite3"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        """
+        CREATE TABLE takeover_signals (
+            ecosystem TEXT NOT NULL, name TEXT NOT NULL, version TEXT NOT NULL, old_version TEXT,
+            score INTEGER NOT NULL, signals_json TEXT NOT NULL, detail_json TEXT NOT NULL, error TEXT,
+            created_at TEXT NOT NULL, PRIMARY KEY (ecosystem, name, version)
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO takeover_signals VALUES ('npm', 'a', '1', NULL, 0, '[]', '{}', NULL, '2026-10-01T00:00:00Z')"
+    )
+    conn.commit()
+    conn.close()
+    db = Database(path)
+    assert db.takeover_signals("npm", "a", "1")["attempts"] == 1
+    db.save_takeover_signals("npm", "a", "1", 0, [], {}, error="x", retry_at=datetime(2026, 10, 1, tzinfo=timezone.utc))
+    stored = db.takeover_signals("npm", "a", "1")
+    assert stored["attempts"] == 2 and stored["retry_at"] == "2026-10-01T00:00:00Z"
+
+
+class _StopOnWait(threading.Event):
+    def wait(self, timeout=None) -> bool:
+        self.set()
+        return True
+
+
+def test_serve_scores_on_its_own_thread_not_in_the_classify_round(tmp_path, monkeypatch):
+    config = _config(tmp_path)
+    db = Database(config.db_path)
+    db.enqueue_job("npm", "calm", "1.0.1", 1)
+    _takeover_loop(db, config, FakeHttp({f"{NPM}/calm": _npm_doc()}), _StopOnWait())
+    assert db.takeover_signals("npm", "calm", "1.0.1")["score"] == 0
+
+    called = []
+    monkeypatch.setattr("hunter.service._score_takeover_safely", lambda *args: called.append(args))
+    monkeypatch.setattr("hunter.service.drain_jobs", lambda *args, **kwargs: 0)
+    drain_until_idle(db, config, jev=None, loader=None, score_takeover=False)
+    assert called == []
+    drain_until_idle(db, config, jev=None, loader=None)
+    assert len(called) == 1

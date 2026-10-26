@@ -952,12 +952,31 @@ def _record_job_failure(db: Database, config: Config, job, exc: BaseException) -
         log.exception("could not record a retry for %s %s %s", ecosystem, name, version)
 
 
-def _score_takeover_safely(db: Database, config: Config, transport: HttpGet) -> None:
+def _score_takeover_safely(
+    db: Database, config: Config, transport: HttpGet, stop: threading.Event | None = None
+) -> int:
     """Account-takeover signals for the next pending jobs. A failure never blocks classify."""
     try:
-        score_pending_jobs(db, config, transport)
+        return score_pending_jobs(db, config, transport, stop=stop)
     except Exception:
         log.exception("takeover signal pass failed")
+        return 0
+
+
+TAKEOVER_IDLE_S = 5.0
+
+
+def _takeover_loop(db: Database, config: Config, transport: HttpGet, stop: threading.Event) -> None:
+    """Score takeover signals beside classify, so slow registry reads never hold up a classify round.
+
+    A full batch means a backlog, so the next batch starts at once; otherwise wait.
+    """
+    batch = max(1, config.takeover_batch)
+    while not stop.is_set():
+        if _score_takeover_safely(db, config, transport, stop) >= batch:
+            continue
+        if stop.wait(TAKEOVER_IDLE_S):
+            return
 
 
 def _score_mcp_safely(db: Database, config: Config, loader: ReleaseLoader) -> None:
@@ -975,12 +994,14 @@ def drain_until_idle(
     jev,
     loader: ReleaseLoader,
     stop: threading.Event | None = None,
+    score_takeover: bool = True,
 ) -> None:
     """Interleave a limited classify batch, Triage, Analyst, and the outbox.
 
     A large classify backlog cannot run to completion before investigations.
     The cycle still stops after `classify_cycle_cap` classifications so a poll
-    is not stuck behind the whole queue.
+    is not stuck behind the whole queue. `serve` scores takeover signals on its
+    own thread and passes `score_takeover=False`.
     """
     classified = 0
     cap = max(1, config.classify_cycle_cap)
@@ -989,8 +1010,8 @@ def drain_until_idle(
             return
         room = cap - classified
         n_jobs = 0
-        if room > 0 and getattr(config, "takeover_signals", False):
-            _score_takeover_safely(db, config, getattr(loader, "transport", http_get))
+        if room > 0 and score_takeover and getattr(config, "takeover_signals", False):
+            _score_takeover_safely(db, config, getattr(loader, "transport", http_get), stop)
         if room > 0 and getattr(config, "mcp_risk", False):
             _score_mcp_safely(db, config, loader)
         if room > 0:
@@ -1909,6 +1930,16 @@ def serve(
                     daemon=True,
                 )
             )
+        takeover = bool(getattr(config, "takeover_signals", False))
+        if takeover:
+            polls.append(
+                threading.Thread(
+                    target=_takeover_loop,
+                    args=(db, config, getattr(release_loader, "transport", transport), stop),
+                    name="hunter-takeover",
+                    daemon=True,
+                )
+            )
         # Start PyPI and npm before the ecosyste.ms probe so that check cannot
         # delay those feeds. The probe still runs before the Actions poll threads.
         started: set[int] = set()
@@ -1923,7 +1954,7 @@ def serve(
                 thread.start()
         while not stop.is_set():
             _reopen_due_retries(db, config)
-            drain_until_idle(db, config, jev=client, loader=release_loader, stop=stop)
+            drain_until_idle(db, config, jev=client, loader=release_loader, stop=stop, score_takeover=False)
             if stop.wait(1.0):
                 break
     finally:

@@ -7,6 +7,7 @@ network, and no package code is downloaded or run.
 from __future__ import annotations
 
 import json
+import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -17,6 +18,7 @@ from hunter import cli
 from hunter.config import Config
 from hunter.db import Database, iso
 from hunter.ground_truth import (
+    MAX_RECORD_BYTES,
     NPM_HOLDER_VERSION,
     REPORT_NAME,
     OsvApiSource,
@@ -199,6 +201,28 @@ def test_takedown_marks_every_npm_version_and_uses_earliest_truth():
     assert report["summary"]["by_source"] == {"osv": 1, "npm_takedown": 2}
 
 
+def test_takedown_without_time_labels_but_skips_time_to_detect():
+    releases = [_row("npm", "gone", "1.0.0", "alert", NOW - timedelta(hours=1))]
+    report = build_report(releases, [], {"gone": None}, now=NOW)
+    [item] = report["items"]
+    assert item["caught"] is True
+    assert item["truth_sources"] == ["npm_takedown"]
+    assert item["truth_at"] is None
+    assert item["time_to_detect_hours"] is None
+    assert report["summary"]["time_to_detect_hours"]["count"] == 0
+    assert report["summary"]["time_to_detect_hours"]["hunter_first"] == 0
+
+
+def test_build_report_uses_scored_at_over_created_at():
+    records = [parse_mal_record(mal("MAL-1", "npm", "late", versions=["1.0.0"], published=NOW))]
+    row = _row("npm", "late", "1.0.0", "review", NOW - timedelta(hours=5))
+    row["scored_at"] = iso(NOW + timedelta(hours=3))
+    report = build_report([row], records, {}, now=NOW)
+    [item] = report["items"]
+    assert item["scored_at"] == iso(NOW + timedelta(hours=3))
+    assert item["time_to_detect_hours"] == 3.0
+
+
 def test_ttd_stats_empty_and_percentile():
     assert ttd_stats([])["median"] is None
     stats = ttd_stats([1.0, 2.0, 3.0, 4.0, 100.0])
@@ -345,7 +369,8 @@ def npm_registry(holders: dict[str, str]):
                 return json.dumps({"name": base, "version": NPM_HOLDER_VERSION}).encode()
             raise FeedError("Not Found")
         if name in holders:
-            return json.dumps({"name": name, "time": {NPM_HOLDER_VERSION: holders[name]}}).encode()
+            times = {NPM_HOLDER_VERSION: holders[name]} if holders[name] else {}
+            return json.dumps({"name": name, "time": times}).encode()
         raise FeedError("Not Found")
 
     get.calls = calls
@@ -354,14 +379,54 @@ def npm_registry(holders: dict[str, str]):
 
 def test_npm_takedown_time():
     get = npm_registry({"gone": "2026-09-30T08:00:00.000Z"})
-    assert npm_takedown_time("gone", REGISTRY, get) == datetime(2026, 9, 30, 8, tzinfo=timezone.utc)
-    assert npm_takedown_time("alive", REGISTRY, get) is None
+    assert npm_takedown_time("gone", REGISTRY, get) == (True, datetime(2026, 9, 30, 8, tzinfo=timezone.utc))
+    assert npm_takedown_time("alive", REGISTRY, get) == (False, None)
 
     def broken(url, timeout=60, **_kw):
         raise FeedError("timed out")
 
     with pytest.raises(FeedError):
         npm_takedown_time("x", REGISTRY, broken)
+
+
+def test_npm_takedown_time_without_holder_time_is_unknown_not_now():
+    assert npm_takedown_time("gone", REGISTRY, npm_registry({"gone": None})) == (True, None)
+
+    def oversized(url, timeout=60, **_kw):
+        if url.endswith(f"/{NPM_HOLDER_VERSION}"):
+            return json.dumps({"name": "big", "version": NPM_HOLDER_VERSION}).encode()
+        return b" " * (MAX_RECORD_BYTES + 1)
+
+    assert npm_takedown_time("big", REGISTRY, oversized) == (True, None)
+
+
+def test_check_npm_takedowns_keeps_takedown_with_unknown_time(tmp_path):
+    cache = tmp_path / "takedowns.json"
+    found, checked, _ = check_npm_takedowns(
+        ["gone"], flagged=set(), cache_path=cache, registry=REGISTRY, limit=5, transport=npm_registry({"gone": None}), now=NOW
+    )
+    assert checked == 1 and found == {"gone": None}
+    found, checked, _ = check_npm_takedowns(
+        ["gone"], flagged=set(), cache_path=cache, registry=REGISTRY, limit=5, transport=no_network, now=NOW
+    )
+    assert checked == 0 and found == {"gone": None}
+
+
+def test_check_npm_takedowns_drops_check_time_cached_as_takedown_time(tmp_path):
+    cache = tmp_path / "takedowns.json"
+    cache.write_text(
+        json.dumps(
+            {
+                "faked": {"checked_at": iso(NOW), "takedown_at": iso(NOW + timedelta(seconds=1))},
+                "real": {"checked_at": iso(NOW), "takedown_at": iso(NOW - timedelta(days=1))},
+            }
+        )
+    )
+    found, checked, _ = check_npm_takedowns(
+        ["faked", "real"], flagged=set(), cache_path=cache, registry=REGISTRY, limit=5, transport=no_network, now=NOW
+    )
+    assert checked == 0
+    assert found == {"faked": None, "real": NOW - timedelta(days=1)}
 
 
 def test_check_npm_takedowns_limits_orders_and_caches(tmp_path):
@@ -455,6 +520,55 @@ def test_run_ground_truth_writes_report(tmp_path):
     written = json.loads((tmp_path / "ground-truth" / REPORT_NAME).read_text())
     assert written["summary"] == summary
     assert report_is_fresh(config)
+
+
+def test_rescore_after_deferred_moves_scored_at(tmp_path):
+    config = make_config(tmp_path)
+    db = Database(config.db_path)
+    try:
+        save(db, "npm", "slow", "1.0.0", "deferred", NOW - timedelta(hours=10))
+        db.save_release("npm", "slow", "1.0.0", "review", 0.9, "none", None, "{}", when=NOW - timedelta(hours=2), replace=True)
+        # A re-save in the same band keeps the time it was first put there.
+        db.save_release("npm", "slow", "1.0.0", "review", 0.9, "none", None, "{}", when=NOW, replace=True)
+        [row] = db.ground_truth_releases("")
+        assert row["created_at"] == iso(NOW - timedelta(hours=10))
+        assert row["scored_at"] == iso(NOW - timedelta(hours=2))
+        source = StaticSource([mal("MAL-1", "npm", "slow", versions=["1.0.0"], published=NOW - timedelta(hours=6))])
+        report = run_ground_truth(db, config, source=source, transport=npm_registry({}), days=0, now=NOW)
+    finally:
+        db.close()
+    # Flagged 4h after OSV, not 4h before it.
+    assert report["summary"]["time_to_detect_hours"]["median"] == 4.0
+    assert report["summary"]["time_to_detect_hours"]["hunter_first"] == 0
+
+
+def test_scored_at_column_added_to_existing_db(tmp_path):
+    path = tmp_path / "old.sqlite3"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        """
+        CREATE TABLE releases (
+            ecosystem TEXT NOT NULL, name TEXT NOT NULL, version TEXT NOT NULL, band TEXT,
+            malice_probability REAL, family TEXT, subtype TEXT, payload_json TEXT,
+            created_at TEXT NOT NULL, PRIMARY KEY (ecosystem, name, version)
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO releases VALUES ('npm', 'old', '1.0.0', 'review', 0.9, 'none', NULL, '{}', ?)",
+        (iso(NOW),),
+    )
+    conn.commit()
+    conn.close()
+    db = Database(path)
+    try:
+        [row] = db.ground_truth_releases("")
+        assert row["scored_at"] == iso(NOW)
+        db.save_release("npm", "old", "1.0.0", "alert", 0.9, "none", None, "{}", when=NOW + timedelta(hours=1), replace=True)
+        [row] = db.ground_truth_releases("")
+        assert row["scored_at"] == iso(NOW + timedelta(hours=1))
+    finally:
+        db.close()
 
 
 def test_run_ground_truth_falls_back_to_cache_on_source_error(tmp_path):
