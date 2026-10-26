@@ -209,6 +209,25 @@ Off by default. When on, Hunter polls `GET /api/v1/timeframe_versions.json` and 
 
 `hunter score --ecosystem rubygems --name NAME --old OLD --new NEW` scores one pair without the poller. Localhost `/health` adds a `rubygems` block with the checkpoint and how many releases the last poll queued. `HUNTER_MAX_PENDING` applies: a full queue pauses the feed on the version that would not fit.
 
+## crates.io
+
+Off by default. When on, Hunter polls the crates.io RSS feeds (`updates.xml` for versions, `crates.xml` for new names) about once a minute. The first poll stores the newest `pubDate` and queues nothing. Later polls queue versions newer than that checkpoint. A `.crate` file is a gzipped tar. Hunter diffs it against the previous non-yanked index line and runs the Rust rules. It does not run `cargo`, `rustc`, or `build.rs`. Scout reads a release only when a weak rule hit and `HUNTER_CRATES_SCOUT` is on. A weak hit, a typosquat, or two medium signals (a changed `build.rs`, a new proc-macro, a new binary `include_bytes!`, a new git or URL dependency) sends the release to Triage. The default is the full feed. `HUNTER_CRATES_WATCHED_ONLY=on` queues only watched crates and up to 25 name lookalikes per poll.
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `HUNTER_CRATES` | off | `on` watches crates.io releases. |
+| `HUNTER_CRATES_SCOUT` | off | `on` lets Scout read a crates.io release, only when a weak rule hit. |
+| `HUNTER_CRATES_WATCHED_ONLY` | off | `on` queues the download-rank watchlist and lookalikes instead of the full feed. |
+| `HUNTER_CRATES_POLL_INTERVAL` | `60` | Seconds between feed polls (at least 60). |
+| `HUNTER_CRATES_TOP_N` | `HUNTER_TOP_N` | Names in the download-rank watchlist. It is the typosquat victim list. |
+| `HUNTER_CRATES_INDEX` | `https://index.crates.io` | Sparse index origin. |
+| `HUNTER_CRATES_STATIC` | `https://static.crates.io` | Static crate downloads and RSS, when the index `dl` template is missing. |
+| `HUNTER_CRATES_API` | `https://crates.io` | Registry API origin. |
+| `HUNTER_CRATES_UPDATES_RSS` | `https://static.crates.io/rss/updates.xml` | Version feed. |
+| `HUNTER_CRATES_CRATES_RSS` | `https://static.crates.io/rss/crates.xml` | New-crate feed. |
+
+Localhost `/health` adds a `crates` block with the feed checkpoint and the watchlist size. `HUNTER_MAX_PENDING` applies: a full queue leaves the checkpoint where it is. The download-rank walk runs on the crates thread, not inside the npm and PyPI watchlist refresh.
+
 ## Account-takeover signals
 
 Off by default. With `HUNTER_TAKEOVER_SIGNALS=on`, Hunter reads registry metadata for each pending npm and PyPI release before Scout and records account-takeover signals for it. No archive is downloaded and no model is called. The classify queue then takes the highest score first; releases with no signals keep their usual oldest-first order. How the signals work: [detection.md](detection.md#account-takeover-signals).

@@ -10,6 +10,8 @@ For each release it downloads the new archive and the previous one and diffs the
 
 Binary and media files aren't dropped. The diff records their kind, size, and a hash prefix instead of the bytes. Text files are read up to 8 MiB each; a longer file is cut and the release is marked as partly read.
 
+A crates.io `.crate` is a gzipped tar. Hunter does not run `cargo`, `rustc`, or `build.rs`. Cargo runs `build.rs` before it compiles the crate, and a proc-macro crate runs at compile time for every downstream crate. A changed `build.rs`, a `[package] build` script, or a new `proc-macro = true` is install-time. Behavior-chain parsing stays Python and JavaScript.
+
 ## Account-takeover signals
 
 Optional (`HUNTER_TAKEOVER_SIGNALS`, off by default). Before Scout reads a release, Hunter checks registry metadata only, with no model calls, for signs that a maintainer account was taken over. Each signal adds to a score, and the classify queue takes higher scores first, so Scout spend goes to the riskiest releases. The signals don't change a band on their own.

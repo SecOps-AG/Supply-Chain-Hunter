@@ -76,7 +76,9 @@ def no_network(url, timeout=60, **_kw):
 def test_parse_skips_non_mal_withdrawn_and_other_ecosystems():
     assert parse_mal_record(mal("GHSA-1", "npm", "x", versions=["1.0.0"])) is None
     assert parse_mal_record(mal("MAL-1", "npm", "x", versions=["1.0.0"], withdrawn=iso(NOW))) is None
-    assert parse_mal_record(mal("MAL-2", "crates.io", "x", versions=["1.0.0"])) is None
+    assert parse_mal_record(mal("MAL-2", "Go", "x", versions=["1.0.0"])) is None
+    crates = parse_mal_record(mal("MAL-2", "crates.io", "x", versions=["1.0.0"]))
+    assert ("crates", "x") in crates.affected
     assert parse_mal_record(["not", "a", "record"]) is None
     record = parse_mal_record(mal("MAL-3", "PyPI", "Evil_Pkg", versions=["1.0"]))
     assert ("pypi", "evil-pkg") in record.affected
@@ -307,6 +309,14 @@ def test_git_source_clones_then_fetches_and_reads_by_folder(tmp_path):
     calls.clear()
     source.records({("npm", "@scope/bad")}, fetch=False)
     assert calls == []
+
+
+def test_git_source_reads_crates_from_the_crates_folder(tmp_path):
+    _write_record(tmp_path, "crates.io", "badcrate", mal("MAL-9", "crates.io", "badcrate", versions=["0.1.0"]))
+    _write_record(tmp_path, "npm", "badcrate", mal("MAL-8", "npm", "badcrate", versions=["0.1.0"]))
+    source = OsvGitSource(tmp_path, "unused", git=lambda args, cwd: None)
+    found = source.records({("crates", "badcrate")}, fetch=False)
+    assert [record.id for record in found] == ["MAL-9"]
 
 
 def test_git_source_skips_symlinked_and_oversized_files(tmp_path):

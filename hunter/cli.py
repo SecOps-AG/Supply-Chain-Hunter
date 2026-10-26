@@ -420,7 +420,7 @@ def build_parser() -> argparse.ArgumentParser:
     scan.set_defaults(func=_cmd_scan)
 
     score = sub.add_parser("score", help="classify two versions or two local archives")
-    score.add_argument("--ecosystem", choices=("pypi", "npm", "rubygems"))
+    score.add_argument("--ecosystem", choices=("pypi", "npm", "rubygems", "crates"))
     score.add_argument("--name")
     score.add_argument("--old")
     score.add_argument("--new")

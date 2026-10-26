@@ -91,7 +91,7 @@
       <form class="filters" id="find-form" autocomplete="off">
         <label>Package<input type="search" name="q" placeholder="name or version"></label>
         <label>Show<select name="scope"><option value="triage">Reached Triage</option><option value="flagged">All Scout flags</option></select></label>
-        <label>Ecosystem<select name="ecosystem"><option value="">Any</option><option value="npm">npm</option><option value="pypi">PyPI</option><option value="github-actions">GitHub Actions</option></select></label>
+        <label>Ecosystem<select name="ecosystem"><option value="">Any</option><option value="npm">npm</option><option value="pypi">PyPI</option><option value="github-actions">GitHub Actions</option><option value="crates">Crates</option></select></label>
         <label>Final verdict<select name="verdict"><option value="">Any</option><option value="malicious">Analyst malicious</option><option value="uncertain">Analyst uncertain</option><option value="benign">Analyst benign</option><option value="triage benign">Triage benign</option><option value="triage uncertain">Triage uncertain</option><option value="triage malicious">Triage malicious (no Analyst yet)</option><option value="in triage">In Triage</option><option value="triage exhausted">Triage failed</option></select></label>
         <label>Scout band<select name="band"><option value="">Any</option><option value="alert">alert</option><option value="review">review</option><option value="deferred">deferred</option></select></label>
         <label>Stage reached<select name="stage"><option value="">Any</option><option value="scout">Scout</option><option value="triage">Triage</option><option value="analyst">Analyst</option><option value="webhook">Webhook</option></select></label>

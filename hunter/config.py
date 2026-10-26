@@ -191,6 +191,11 @@ MCP_REGISTRY_URL = "https://registry.modelcontextprotocol.io"
 OPENVSX_URL = "https://open-vsx.org"
 RUBYGEMS_URL = "https://rubygems.org"
 RUBYGEMS_MAX_PAGES = 100
+CRATES_INDEX = "https://index.crates.io"
+CRATES_STATIC = "https://static.crates.io"
+CRATES_API = "https://crates.io"
+CRATES_UPDATES_RSS = "https://static.crates.io/rss/updates.xml"
+CRATES_CRATES_RSS = "https://static.crates.io/rss/crates.xml"
 
 
 def _flag(name: str, default: bool = False) -> bool:
@@ -355,6 +360,18 @@ class Config:
     rubygems_poll_interval: float = 60.0
     rubygems_scout: bool = False
     rubygems_max_pages: int = 20
+    # crates.io releases through the static RSS feeds (HUNTER_CRATES). Off by default.
+    # Rules read every release. Scout reads one only when a weak rule hit and HUNTER_CRATES_SCOUT is on.
+    crates: bool = False
+    crates_scout: bool = False
+    crates_watched_only: bool = False
+    crates_poll_interval: float = 60.0
+    crates_top_n: int = 15000
+    crates_index: str = CRATES_INDEX
+    crates_static: str = CRATES_STATIC
+    crates_api: str = CRATES_API
+    crates_updates_rss: str = CRATES_UPDATES_RSS
+    crates_crates_rss: str = CRATES_CRATES_RSS
     # Account-takeover signals from registry metadata before Scout (HUNTER_TAKEOVER_SIGNALS).
     # Off by default. No model calls; on, the classify queue takes higher scores first.
     takeover_signals: bool = False
@@ -419,9 +436,10 @@ class Config:
                 analyst_base_url = smart_base_url
             else:
                 analyst_base_url = resolve_openrouter_base_url("")
+        top_n = int(os.environ.get("HUNTER_TOP_N", "15000"))
         return cls(
             db_path=Path(os.environ.get("HUNTER_DB", "hunter.sqlite3")),
-            top_n=int(os.environ.get("HUNTER_TOP_N", "15000")),
+            top_n=top_n,
             poll_interval=float(os.environ.get("HUNTER_POLL_INTERVAL", "300")),
             watchlist_refresh=float(os.environ.get("HUNTER_WATCHLIST_REFRESH", str(6 * 3600))),
             workers=int(os.environ.get("HUNTER_WORKERS", "4")),
@@ -537,6 +555,16 @@ class Config:
             rubygems_poll_interval=max(60.0, float(os.environ.get("HUNTER_RUBYGEMS_POLL_INTERVAL", "60"))),
             rubygems_scout=_flag("HUNTER_RUBYGEMS_SCOUT"),
             rubygems_max_pages=min(RUBYGEMS_MAX_PAGES, max(1, int(os.environ.get("HUNTER_RUBYGEMS_MAX_PAGES", "20")))),
+            crates=_flag("HUNTER_CRATES"),
+            crates_scout=_flag("HUNTER_CRATES_SCOUT"),
+            crates_watched_only=_flag("HUNTER_CRATES_WATCHED_ONLY"),
+            crates_poll_interval=max(60.0, float(os.environ.get("HUNTER_CRATES_POLL_INTERVAL", "60"))),
+            crates_top_n=max(0, int(os.environ.get("HUNTER_CRATES_TOP_N", str(top_n)))),
+            crates_index=os.environ.get("HUNTER_CRATES_INDEX", "").strip().rstrip("/") or CRATES_INDEX,
+            crates_static=os.environ.get("HUNTER_CRATES_STATIC", "").strip().rstrip("/") or CRATES_STATIC,
+            crates_api=os.environ.get("HUNTER_CRATES_API", "").strip().rstrip("/") or CRATES_API,
+            crates_updates_rss=os.environ.get("HUNTER_CRATES_UPDATES_RSS", "").strip() or CRATES_UPDATES_RSS,
+            crates_crates_rss=os.environ.get("HUNTER_CRATES_CRATES_RSS", "").strip() or CRATES_CRATES_RSS,
             takeover_signals=_flag("HUNTER_TAKEOVER_SIGNALS"),
             takeover_batch=max(1, int(os.environ.get("HUNTER_TAKEOVER_BATCH", "50"))),
             takeover_dormant_days=max(0, int(os.environ.get("HUNTER_TAKEOVER_DORMANT_DAYS", "365"))),

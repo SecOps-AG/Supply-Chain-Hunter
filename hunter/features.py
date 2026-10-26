@@ -156,7 +156,7 @@ def lifecycle_edit_count(old_files: dict[str, str], new_files: dict[str, str]) -
             count += 1
         elif path not in old_files and any(token in new.lower() for token in ("cmdclass", "subprocess", "base64")):
             count += 1
-    return count
+    return count + _rust_lifecycle_edits(old_files, new_files)
 
 
 def _rough_added(old: str, new: str) -> str:
@@ -863,6 +863,37 @@ def build_config_changes(old_files: dict[str, str], new_files: dict[str, str]) -
     return found
 
 
+# Popular Rust crates used only when the release ecosystem is crates.
+# They stay out of COMMON_PACKAGES so npm and PyPI scoring does not see them.
+RUST_PACKAGES = {"rust_decimal", "fast_log"}
+
+
+def _rust_lifecycle_edits(old_files: dict[str, str], new_files: dict[str, str]) -> int:
+    """A changed non-empty build.rs, plus a proc-macro flag that was not there before."""
+    count = 0
+    for path in set(old_files) | set(new_files):
+        if path.rsplit("/", 1)[-1].lower() != "build.rs":
+            continue
+        new = new_files.get(path, "")
+        old = old_files.get(path, "")
+        if isinstance(new, str) and new.strip() and new != old:
+            count += 1
+    if _proc_macro_appeared(new_files) and not _proc_macro_appeared(old_files):
+        count += 1
+    return count
+
+
+def _proc_macro_appeared(files: dict[str, str]) -> bool:
+    from hunter.crates.review import proc_macro_enabled
+
+    for path, text in files.items():
+        if path.rsplit("/", 1)[-1].lower() != "cargo.toml" or not isinstance(text, str):
+            continue
+        if proc_macro_enabled(text):
+            return True
+    return False
+
+
 def _name_index(popular_names: set[str] | None) -> NameIndex:
     names = set(COMMON_PACKAGES)
     if popular_names:
@@ -912,13 +943,26 @@ def extract_features(
         old_hosts.update(unexpected_hosts(item.old_text))
         new_hosts.update(unexpected_hosts(item.added_text))
     behavior_chains, runtime_behavior_chains = find_behavior_chains(old_files, new_files, kept)
-    index = _name_index(popular_names)
-    package_victim = index.match(meta.name)
-    dependency_typosquats = []
-    for name in fresh:
-        victim = index.match(name)
-        if victim:
-            dependency_typosquats.append(f"{name}~{victim}")
+    if meta.ecosystem == "crates":
+        from hunter.crates import victim_name
+
+        names = set(RUST_PACKAGES)
+        if popular_names:
+            names.update(str(name).lower() for name in popular_names)
+        package_victim = victim_name(meta.name, names)
+        dependency_typosquats = []
+        for name in fresh:
+            victim = victim_name(name, names)
+            if victim:
+                dependency_typosquats.append(f"{name}~{victim}")
+    else:
+        index = _name_index(popular_names)
+        package_victim = index.match(meta.name)
+        dependency_typosquats = []
+        for name in fresh:
+            victim = index.match(name)
+            if victim:
+                dependency_typosquats.append(f"{name}~{victim}")
     return CodeFeatures(
         lifecycle_script_edits=lifecycle_edits,
         new_dependency_names=fresh,

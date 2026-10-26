@@ -32,6 +32,9 @@ from hunter.rubygems.feed import CHECKPOINT as RUBYGEMS_CHECKPOINT
 from hunter.rubygems.feed import QUEUED_KEY as RUBYGEMS_QUEUED
 from hunter.rubygems.feed import poll_rubygems
 from hunter.rubygems.review import classify_gem, load_gem_release
+from hunter.crates import ECOSYSTEM as CRATES_ECOSYSTEM
+from hunter.crates.feed import poll_crates
+from hunter.crates.review import classify_crate, load_crate_trees
 from hunter.archives import (
     ArchiveError,
     DiskTree,
@@ -114,6 +117,8 @@ class ReleaseLoader:
             return self._pypi(name, version, rank, previous=None)
         if ecosystem == "rubygems":
             return self._rubygems(name, version, rank, previous=None)
+        if ecosystem == CRATES_ECOSYSTEM:
+            return load_crate_trees(self.config, self.transport, name, version, rank, None)
         return self._npm(name, version, rank, previous=None)
 
     def load_versions(self, ecosystem: str, name: str, old: str, new: str):
@@ -122,6 +127,8 @@ class ReleaseLoader:
             return self._pypi(name, new, None, previous=old)
         if ecosystem == "rubygems":
             return self._rubygems(name, new, None, previous=old)
+        if ecosystem == CRATES_ECOSYSTEM:
+            return load_crate_trees(self.config, self.transport, name, new, None, old or None)
         return self._npm(name, new, None, previous=old)
 
     def _rubygems(self, name: str, version: str, rank: int | None, previous: str | None):
@@ -393,6 +400,23 @@ def classify_openvsx_job(
     _classify_reviewed_job(db, config, job, review=_review)
 
 
+def classify_crate_job(
+    db: Database,
+    config: Config,
+    job,
+    *,
+    jev,
+    loader: ReleaseLoader,
+    transport: HttpGet = http_get,
+) -> None:
+    """One crates.io release: rules on every release, Scout only on a weak hit when allowed."""
+
+    def _review():
+        return classify_crate(db, config, job, transport=transport, jev=jev)
+
+    _classify_reviewed_job(db, config, job, review=_review)
+
+
 def _classify_reviewed_job(db: Database, config: Config, job, *, review) -> None:
     """Save the row a deterministic review returns, then queue Triage when it asks for it.
 
@@ -483,6 +507,9 @@ def classify_job(db: Database, config: Config, job, *, jev, loader: ReleaseLoade
         return
     if ecosystem == RUBYGEMS_ECOSYSTEM:
         classify_rubygems_job(db, config, job, jev=jev, loader=loader, transport=transport)
+        return
+    if ecosystem == CRATES_ECOSYSTEM:
+        classify_crate_job(db, config, job, jev=jev, loader=loader, transport=transport)
         return
     name = str(job["name"])
     version = str(job["version"])
@@ -1284,6 +1311,14 @@ def _poll_rubygems_safely(db: Database, config: Config, transport: HttpGet, stop
         log.warning("RubyGems poll failed: %s", exc)
 
 
+def _poll_crates_safely(db: Database, config: Config, transport: HttpGet, stop: threading.Event | None) -> None:
+    try:
+        poll_crates(db, config, transport, stop)
+    except Exception as exc:
+        db.mark_poll_error(CRATES_ECOSYSTEM, str(exc))
+        log.warning("crates.io poll failed: %s", exc)
+
+
 def _feed_loop(stop: threading.Event, interval: float, fn) -> None:
     while not stop.is_set():
         fn()
@@ -1389,6 +1424,11 @@ def health_payload(
         payload["rubygems"] = {
             "checkpoint": db.get_checkpoint(RUBYGEMS_CHECKPOINT),
             "last_queued": last_queued,
+        }
+    if config is not None and getattr(config, "crates", False):
+        payload["crates"] = {
+            "checkpoint": db.get_checkpoint(CRATES_ECOSYSTEM),
+            "watchlist": len(db.watch_names(CRATES_ECOSYSTEM)),
         }
     if meter is not None:
         payload.update(meter.health())
@@ -1647,6 +1687,19 @@ def serve(
                         "fn": lambda: _poll_rubygems_safely(db, config, transport, stop),
                     },
                     name="hunter-rubygems",
+                    daemon=True,
+                )
+            )
+        if config.crates:
+            polls.append(
+                threading.Thread(
+                    target=_feed_loop,
+                    kwargs={
+                        "stop": stop,
+                        "interval": config.crates_poll_interval,
+                        "fn": lambda: _poll_crates_safely(db, config, transport, stop),
+                    },
+                    name="hunter-crates",
                     daemon=True,
                 )
             )

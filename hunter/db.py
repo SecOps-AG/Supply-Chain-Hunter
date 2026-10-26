@@ -563,7 +563,7 @@ class Database:
             ).fetchall()
         found = {str(row["ecosystem"]): row["last_success_at"] for row in rows}
         polls = {"pypi": found.get("pypi"), "npm": found.get("npm")}
-        for extra in ("github-actions", "mcp", "openvsx", "rubygems"):
+        for extra in ("github-actions", "mcp", "openvsx", "rubygems", "crates"):
             if extra in found:
                 polls[extra] = found[extra]
         return polls
@@ -1680,7 +1680,7 @@ class Database:
                 FROM releases r
                 LEFT JOIN public_feed_items p
                   ON p.ecosystem = r.ecosystem AND p.name = r.name AND p.version = r.version
-                WHERE r.ecosystem IN ('npm', 'pypi', 'openvsx') AND r.created_at >= ?
+                WHERE r.ecosystem IN ('npm', 'pypi', 'openvsx', 'crates') AND r.created_at >= ?
                 """,
                 (since,),
             ).fetchall()
