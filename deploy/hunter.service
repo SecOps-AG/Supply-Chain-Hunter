@@ -18,6 +18,10 @@ Environment=HUNTER_WORKERS=4
 Environment=HUNTER_MAX_PENDING=2000
 # Narrow the watch with HUNTER_TOP_N, HUNTER_WORKERS, and HUNTER_POLL_INTERVAL.
 # Logs go to $HUNTER_LOG_DIR/hunter_YYYYMMDD.log (default ./logs) and stderr.
+# Optional, off unless set in the env file: HUNTER_ACTIONS=on watches GitHub
+# Actions tags. Leave HUNTER_ACTIONS_SCOUT unset. HUNTER_ACTIONS_FROM_PACKAGES
+# defaults on and walks the npm and PyPI watchlists, which needs
+# HUNTER_GITHUB_TOKEN. Do not set HUNTER_ACTIONS=on in this unit.
 # Optional: HUNTER_SKIP_PYPI, HUNTER_SKIP_NPM, HUNTER_SMART_ANALYSIS=0,
 # HUNTER_AI_MAX_ATTEMPTS, HUNTER_CLASSIFY_BATCH, HUNTER_TRIAGE_BUDGET,
 # HUNTER_ANALYST=0, HUNTER_ANALYST_BUDGET, HUNTER_TRIAGE_LESSONS.

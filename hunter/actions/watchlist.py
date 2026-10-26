@@ -25,7 +25,7 @@ from urllib.parse import quote
 from hunter.actions import ECOSYSTEM, normalize_name
 from hunter.actions.github import GitHubClient
 from hunter.actions.manifest import ACTION_FILES, parse_action, used_actions
-from hunter.db import Database
+from hunter.db import Database, iso, utcnow
 from hunter.registry import FeedError, HttpGet, http_get
 
 log = logging.getLogger("hunter.actions.watchlist")
@@ -33,6 +33,9 @@ log = logging.getLogger("hunter.actions.watchlist")
 TOP_PAGE_SIZE = 100
 TOP_MAX_PAGES = 200
 META_WORKERS = 8
+# Short on purpose: a down ecosyste.ms must not stall serve.
+PROBE_TIMEOUT_S = 10.0
+PROBE_ERROR_LIMIT = 200
 _GITHUB_URL = re.compile(r"github\.com[/:]+([A-Za-z0-9][A-Za-z0-9-]*)/([A-Za-z0-9._-]+)", re.IGNORECASE)
 _SHORTHAND = re.compile(r"^(?:github:)?([A-Za-z0-9][A-Za-z0-9-]*)/([A-Za-z0-9._-]+)$")
 
@@ -53,6 +56,41 @@ def github_repo_from_url(raw: object, *, shorthand: bool = False) -> str | None:
 def _page_url(base: str, page: int) -> str:
     joiner = "&" if "?" in base else "?"
     return f"{base}{joiner}sort=dependent_repos_count&order=desc&per_page={TOP_PAGE_SIZE}&page={page}"
+
+
+def _probe_error(exc: BaseException) -> str:
+    text = str(exc).strip() or exc.__class__.__name__
+    return " ".join(text.split())[:PROBE_ERROR_LIMIT]
+
+
+def _first_owner_repo(rows: object) -> str | None:
+    """``owner/repo`` from the first row, or None."""
+    if not isinstance(rows, list) or not rows or not isinstance(rows[0], dict):
+        return None
+    row = rows[0]
+    return github_repo_from_url(row.get("repository_url")) or normalize_name(str(row.get("name") or ""))
+
+
+def probe_ecosyste(config, transport: HttpGet = http_get) -> dict[str, object]:
+    """GET page 1 of ``config.actions_top_url``.
+
+    Returns whether ecosyste.ms answered, the check time, and a short error.
+    The body must be a JSON list whose first row yields an ``owner/repo``.
+    Package-source repositories are not followed.
+    """
+    checked_at = iso(utcnow())
+    try:
+        blob = transport(_page_url(config.actions_top_url, 1), PROBE_TIMEOUT_S)
+        rows = json.loads(blob.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return {"ok": False, "checked_at": checked_at, "error": "actions top list is not JSON"}
+    except (FeedError, OSError, TimeoutError, ValueError) as exc:
+        return {"ok": False, "checked_at": checked_at, "error": _probe_error(exc)}
+    if not isinstance(rows, list):
+        return {"ok": False, "checked_at": checked_at, "error": "actions top list is not a JSON list"}
+    if _first_owner_repo(rows) is None:
+        return {"ok": False, "checked_at": checked_at, "error": "actions top list has no owner/repo"}
+    return {"ok": True, "checked_at": checked_at, "error": None}
 
 
 def load_top_actions(top_n: int, url: str, transport: HttpGet = http_get) -> tuple[list[tuple[str, int]], dict[str, set[str]]]:

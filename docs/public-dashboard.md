@@ -11,7 +11,7 @@ serve (127.0.0.1) ──S3 PUT──► R2 bucket `hunter-public` (live/* object
 Cloudflare Pages (public_dashboard/) ─┘  same origin, or a separate data host
 ```
 
-**Same origin (simplest):** the Pages project serves the static UI from this repo and also answers `/live/*` from the bucket, using a small Pages Function or Worker that you deploy yourself (it is not part of this repository). It should allow only `GET` and `HEAD` on the keys listed under "R2 object layout". The shipped `config.js` leaves `dataBase` empty, so the browser reads the `live/` objects relative to the Pages host.
+**Same origin (simplest):** the Pages project serves the static UI from this repo and also answers `/live/*` from the bucket. The Pages Function in `public_dashboard/functions/live/[[path]].js` is part of this repository and deploys with the static site. It allows `GET` and `HEAD` only, reads R2 binding `DASH_BUCKET`, and accepts a key only when it matches the live objects in `allowed_public_object_key` (npm, PyPI, GitHub Actions, and Open VSX release objects, plus `live.json`, `benchmark.json`, history, and confirmed). Any other key, including a bare `/live/r/github-actions`, is a 9-byte `Not found` with `Cache-Control: no-store`. `..` and backslashes are rejected. `/feed.json` is not served on this host. The shipped `config.js` leaves `dataBase` empty, so the browser reads the `live/` objects relative to the Pages host.
 
 **Separate data host:** set `window.HUNTER_PUBLIC.dataBase` to a dedicated HTTPS origin (for example `https://data.example.com`) to read JSON directly from an R2 custom domain without going through Pages.
 
@@ -29,6 +29,8 @@ A background thread debounces changes (2 s) and uploads with a 5 s timeout. Uplo
 | `live/history/YYYY-MM-DD.json` | Daily pipeline rollup | `max-age=60` for today; `immutable` for past days |
 | `live/confirmed/YYYY-MM-DD.json` | That day’s findings rows with stage labels | same |
 | `live/r/<eco>/<name>/<version>.json` | Same shape as `/api/release` (pop-out) | `immutable` |
+
+`<name>` and `<version>` are one path segment each. A slash in the name or version is written as `~` (so `actions/checkout` and `@scope/pkg` are not `%2F`), then the segment is percent-encoded (`@` in `tag@sha12` becomes `%40`). Unscoped keys such as `live/r/pypi/tox/4.64.10.json` and `live/r/npm/vite/8.3.4.json` stay unchanged. A bare `/live/r/github-actions` is not an object key and stays 404.
 
 Scout/Triage rows carry `public_stage_note`: **under review, not a verdict**. Analyst verdicts carry **AI verdict (may be wrong): …**. Package names, signals, rule IDs, and model reports match the local dashboard. The public health block carries only `status` and the last successful read of each feed, and each pipeline role is published by its label (for example "decision model", Scout) without the model behind it. Queue sizes, budgets, spend, spend caps, uptime, and model ids stay on the local dashboard. Secrets, webhook URLs, internal filesystem paths, raw error strings, and environment values are stripped.
 
@@ -53,7 +55,7 @@ Scout/Triage rows carry `public_stage_note`: **under review, not a verdict**. An
 ## Deploy the static site
 
 1. Deploy the `public_dashboard/` folder to **Cloudflare Pages** (no build step). **`config.js` defaults to same-origin** (`dataBase: ""` → `/live/live.json`).
-2. Wire `/live/*` to the bucket (for example with your own Pages Function on the same Pages project; not in this repo).
+2. Deploy `functions/live/[[path]].js` with the static site. It is the `/live/*` route: `GET` and `HEAD` only, binding `DASH_BUCKET`, allowlist as above, edge cache keyed without the query string, and `max-age=2` when the object sets no `Cache-Control`. The response uses the object's `Content-Type` and `Cache-Control`.
 3. Optional override before deploy:
 
    ```javascript

@@ -132,7 +132,7 @@ How it works: [github-actions.md](github-actions.md).
 | `HUNTER_ACTIONS_MAX` | `5000` | Most actions watched in total. |
 | `HUNTER_ACTIONS_TOP_URL` | ecosyste.ms `github actions` packages API | Source of the most-used list. |
 | `HUNTER_ACTIONS_EXTRA` | unset | `owner/repo` names always watched, comma or space separated. |
-| `HUNTER_ACTIONS_FROM_PACKAGES` | `on` | Add the actions used by the npm and PyPI watchlist's source repositories (needs the token). |
+| `HUNTER_ACTIONS_FROM_PACKAGES` | `on` | Walk the npm and PyPI watchlists, then add the actions used by those source repositories. Needs `HUNTER_GITHUB_TOKEN`. |
 | `HUNTER_ACTIONS_POLL_INTERVAL` | `300` | Seconds between tag polls. |
 | `HUNTER_ACTIONS_POLL_WORKERS` | `8` | Parallel tag reads over git. |
 | `HUNTER_ACTIONS_SWEEP_INTERVAL` | `86400` | With a token, seconds between full reads of every tag. |
@@ -140,7 +140,9 @@ How it works: [github-actions.md](github-actions.md).
 | `HUNTER_ACTIONS_SCOUT` | off | `on` lets Scout read new action tags. |
 | `HUNTER_ACTIONS_SCOUT_PER_DAY` | `100` | Most new action tags Scout reads per day. |
 
-Localhost `/health` adds a `github_actions` block with watched actions, recorded tags, tag events in the last day, and whether a token is set.
+Set `HUNTER_ACTIONS=on` to watch tags. Leave `HUNTER_ACTIONS_SCOUT` unset so Scout does not read action tags. The default `HUNTER_ACTIONS_FROM_PACKAGES` walks the npm and PyPI watchlists and needs `HUNTER_GITHUB_TOKEN`. The first watchlist refresh runs when `serve` starts if no list is stored yet, then again every `HUNTER_ACTIONS_WATCHLIST_REFRESH` seconds.
+
+Localhost `/health` adds a `github_actions` block with watched actions, recorded tags, tag events in the last day, and whether a token is set. When Actions is on, that block also has `ecosyste_ok`, `ecosyste_checked_at`, and `ecosyste_error` from a check that page 1 of the ecosyste.ms list is a JSON list whose first row is an `owner/repo`. The check runs once when `serve` starts, before the action poll threads, and again at the start of each watchlist refresh. A failure is logged, `ecosyste_ok` is false, and `serve` keeps running. PyPI and npm polls are started before the check so it cannot delay them. The three fields stay off the public dashboard.
 
 ## Ground truth (OSV `MAL-` and npm takedowns)
 
