@@ -17,9 +17,13 @@ from pathlib import PurePosixPath
 
 import yaml
 
-from hunter.archives import ArchiveError, DiskTree, unpack_file
+from hunter.archives import ArchiveError, DiskTree, extract_limits, unpack_file
+from hunter.registry import PACKAGE_DOWNLOAD_MAX_BYTES
 
 SPEC_LIMIT = 1024 * 1024
+# Spec key for member paths that were skipped. Any value a gem's own metadata sets here is dropped.
+REFUSED_KEY = "__hunter_refused_members__"
+REFUSED_LIMIT = 20
 METADATA_GZIP_CAP = 2 * 1024 * 1024
 _SPEC_DEPTH = 64
 
@@ -104,11 +108,10 @@ def _gunzip_capped(blob: bytes, limit: int) -> bytes:
     return out
 
 
-def _refuse_member(member: tarfile.TarInfo) -> None:
+def _refused(member: tarfile.TarInfo) -> bool:
     name = str(member.name or "").replace("\\", "/")
     parts = PurePosixPath(name).parts
-    if member.issym() or member.islnk() or name.startswith("/") or ".." in parts:
-        raise ArchiveError(f"refusing gem path {name}")
+    return member.issym() or member.islnk() or name.startswith("/") or ".." in parts
 
 
 def _read_member(archive: tarfile.TarFile, member: tarfile.TarInfo, limit: int) -> bytes:
@@ -121,22 +124,39 @@ def _read_member(archive: tarfile.TarFile, member: tarfile.TarInfo, limit: int) 
     return blob
 
 
-def _refuse_data_tar(path) -> None:
+def _refused_data_members(path) -> list[str]:
+    """Names in ``data.tar.gz`` that ``unpack_file`` skips. Member count and sizes are capped."""
+    max_bytes, max_files = extract_limits()
+    total = 0
+    count = 0
+    refused: list[str] = []
     try:
         with tarfile.open(path, mode="r:*") as archive:
-            for member in archive:
-                _refuse_member(member)
+            while (member := archive.next()) is not None:
+                # Keep no TarInfo list; only the running totals.
+                archive.members.clear()
+                count += 1
+                if count > max_files:
+                    raise ArchiveError(f"data.tar.gz holds more than {max_files} members")
+                if member.isfile():
+                    total += max(0, int(member.size))
+                    if total > max_bytes:
+                        raise ArchiveError(f"data.tar.gz unpacks to more than {max_bytes} bytes")
+                if _refused(member):
+                    refused.append(str(member.name or ""))
     except ArchiveError:
         raise
-    except (tarfile.TarError, OSError) as exc:
+    except (tarfile.TarError, OSError, EOFError) as exc:
         raise ArchiveError(str(exc)) from exc
+    return refused
 
 
 def extract_gem(source: bytes | os.PathLike) -> tuple[DiskTree, dict]:
     """Outer tar to ``(files, spec)``. ``data.tar.gz`` is unpacked with ``unpack_file``.
 
-    A path that escapes the archive, a symlink, or a spec that uses YAML aliases
-    is refused. The returned tree's caller closes it.
+    A member that escapes the archive or is a link is skipped, and its name is
+    listed in ``spec[REFUSED_KEY]``. A spec that uses YAML aliases is refused.
+    The returned tree's caller closes it.
     """
     from pathlib import Path
 
@@ -152,10 +172,14 @@ def extract_gem(source: bytes | os.PathLike) -> tuple[DiskTree, dict]:
     data_path: Path | None = None
     try:
         metadata_gz = None
+        refused: list[str] = []
         try:
-            with tarfile.open(archive_path, mode="r:*") as outer:
+            # A .gem is a plain tar. A compressed outer tar is refused.
+            with tarfile.open(archive_path, mode="r:") as outer:
                 for member in outer:
-                    _refuse_member(member)
+                    if _refused(member):
+                        refused.append(str(member.name or ""))
+                        continue
                     if not member.isfile():
                         continue
                     base = PurePosixPath(str(member.name).replace("\\", "/")).name
@@ -168,11 +192,17 @@ def extract_gem(source: bytes | os.PathLike) -> tuple[DiskTree, dict]:
                         handle = outer.extractfile(member)
                         if handle is None:
                             raise ArchiveError("data.tar.gz is not a file")
+                        if member.size > PACKAGE_DOWNLOAD_MAX_BYTES:
+                            raise ArchiveError("data.tar.gz is too large")
+                        written = 0
                         with data_path.open("wb") as out:
                             while True:
                                 chunk = handle.read(1024 * 1024)
                                 if not chunk:
                                     break
+                                written += len(chunk)
+                                if written > PACKAGE_DOWNLOAD_MAX_BYTES:
+                                    raise ArchiveError("data.tar.gz is too large")
                                 out.write(chunk)
         except ArchiveError:
             raise
@@ -181,7 +211,10 @@ def extract_gem(source: bytes | os.PathLike) -> tuple[DiskTree, dict]:
         if metadata_gz is None or data_path is None:
             raise ArchiveError("gem is missing metadata.gz or data.tar.gz")
         spec = parse_gem_spec(_gunzip_capped(metadata_gz, SPEC_LIMIT))
-        _refuse_data_tar(data_path)
+        spec.pop(REFUSED_KEY, None)
+        refused.extend(_refused_data_members(data_path))
+        if refused:
+            spec[REFUSED_KEY] = list(dict.fromkeys(refused))[:REFUSED_LIMIT]
         owner = tempfile.TemporaryDirectory(prefix="hunter-gem-tree-")
         try:
             unpack_file(data_path, Path(owner.name))

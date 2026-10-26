@@ -20,7 +20,7 @@ from hunter.models import ReleaseMeta
 from hunter.public_feed import PublicAlert, alert_title, public_registry_url
 from hunter.registry import parse_time
 from hunter.rubygems import allowed_gem_url, registry_url
-from hunter.rubygems.archive import extract_gem
+from hunter.rubygems.archive import REFUSED_KEY, extract_gem
 from hunter.rubygems.feed import CHECKPOINT, poll_rubygems
 from hunter.rubygems.review import classify_gem, predecessor_row, review_trees, spec_signals
 from hunter.rules import scan_release
@@ -204,7 +204,7 @@ def test_first_poll_sets_the_checkpoint_and_queues_nothing(tmp_path):
     assert db.last_poll()["rubygems"]
 
 
-def test_next_poll_queues_ruby_and_skips_the_rest(tmp_path):
+def test_next_poll_queues_ruby_and_platform_builds_and_skips_the_rest(tmp_path):
     db = Database(tmp_path / "hunter.sqlite3")
     config = _config(tmp_path, rubygems=True)
     assert poll_rubygems(db, config, lambda url, timeout: b"[]") == 0
@@ -216,12 +216,12 @@ def test_next_poll_queues_ruby_and_skips_the_rest(tmp_path):
         _row("good", "1.0.0", stamp="2026-10-26T16:05:00.000Z"),
     ]
     feed = Pages({1: page})
-    assert poll_rubygems(db, config, feed) == 1
+    assert poll_rubygems(db, config, feed) == 2
     jobs = {(row["ecosystem"], row["name"], row["version"]) for row in db.pending_jobs()}
-    assert jobs == {("rubygems", "good", "1.0.0")}
+    assert jobs == {("rubygems", "good", "1.0.0"), ("rubygems", "native", "1.0.0-x86_64-linux")}
     assert db.get_checkpoint(CHECKPOINT) == "2026-10-26T16:05:00.000Z"
     assert poll_rubygems(db, config, Pages({1: page})) == 0
-    assert db.pending_count() == 1
+    assert db.pending_count() == 2
 
 
 def test_a_full_queue_does_not_pass_the_refused_row(tmp_path):
@@ -280,7 +280,7 @@ def test_a_crafted_gem_yields_library_code_and_the_spec():
         tree.close()
 
 
-def test_an_alias_bomb_and_a_parent_path_are_refused():
+def test_an_alias_bomb_is_refused_and_a_parent_path_is_skipped():
     bomb = """--- !ruby/object:Gem::Specification
 name: foo
 a: &a ["x", "x"]
@@ -290,8 +290,12 @@ extensions: []
 """
     with pytest.raises(ArchiveError):
         extract_gem(_gem({"lib/foo.rb": b"puts 1\n"}, bomb))
-    with pytest.raises(ArchiveError):
-        extract_gem(_gem({"../x": b"no\n", "lib/foo.rb": b"ok\n"}, _spec([], None)))
+    tree, spec = extract_gem(_gem({"../x": b"no\n", "lib/foo.rb": b"ok\n"}, _spec([], None)))
+    try:
+        assert tree["lib/foo.rb"] == "ok\n"
+        assert spec[REFUSED_KEY] == ["../x"]
+    finally:
+        tree.close()
 
 
 # --- review signals -----------------------------------------------------------

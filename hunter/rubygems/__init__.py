@@ -1,12 +1,13 @@
-"""RubyGems monitoring: poll timeframe versions and review each ruby-platform release.
+"""RubyGems monitoring: poll timeframe versions and review each release.
 
 A release is a ``.gem`` file. Hunter diffs its library code and install-hook
-fields against the previous ruby-platform version. Scout reads a release only
+fields against the previous version of the same platform. Scout reads a release only
 when a rule hit and ``HUNTER_RUBYGEMS_SCOUT`` is on. Nothing in the gem is
 installed or run.
 
 Release identity in the shared tables: ecosystem ``rubygems``, the published
-name, and the version number (no platform suffix).
+name, and the version number. A platform build adds ``-<platform>``, as in
+its ``.gem`` file name.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ from urllib.parse import urlsplit
 
 ECOSYSTEM = "rubygems"
 REGISTRY = "https://rubygems.org"
-_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
+_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _VERSION = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._-]{0,127}$")
 
 
@@ -26,7 +27,7 @@ def valid_name(name: str) -> bool:
 
 
 def valid_version(version: str) -> bool:
-    """True when ``version`` is a version number with no platform suffix tricks."""
+    """True when ``version`` is safe to put in a RubyGems URL."""
     return bool(_VERSION.match(version or "")) and ".." not in (version or "")
 
 
