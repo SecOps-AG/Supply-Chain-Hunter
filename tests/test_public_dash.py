@@ -255,14 +255,12 @@ def test_published_release_object_keeps_public_fields(db):
     assert body["analyst"]["verdict"] == "malicious"
 
 
-@pytest.mark.xfail(
-    reason="H4: release objects still publish rule_hits[].matched, triage/analyst report and scout_model_id; "
-    "whether to drop them is an open product decision",
-    strict=False,
-)
-def test_published_release_object_omits_snippets_reports_and_model_id(db):
+def test_published_release_object_omits_model_id_and_keeps_reports(db):
     body = _published_release(db, "<b>demo-html</b>")
-    assert not {"matched", "report", "scout_model_id"} & set(_all_keys(body))
+    assert "scout_model_id" not in set(_all_keys(body))
+    assert not any("model_id" in key for key in _all_keys(body))
+    assert body["triage"]["report"]
+    assert body["analyst"]["report"]
 
 
 def test_put_feed_object_refuses_unknown_keys():

@@ -770,7 +770,7 @@ async function openRelease(item) {
   const secs = [];
   secs.push(h("div", { class: "dsec" }, h("h4", { text: "Scout" }), kv([
     ["Versions", (r.old_version || "?") + " → " + r.version], ["Band", r.band], ["P(malice)", prob(r.p)], ["Family", r.family],
-    ["Subtype", r.subtype], ["Rule verdict", r.rule_verdict], ["Decision model", shownDecisionModel(r.scout_model_id)], ["Scored", clock(r.created_at)],
+    ["Subtype", r.subtype], ["Rule verdict", r.rule_verdict], ["Scored", clock(r.created_at)],
     ["Partial read", r.partial_reasons.length ? r.partial_reasons.join(", ") : "no"], ["Deferred because", r.defer_reason]])));
   if (r.registry_url && /^https:\/\//.test(r.registry_url)) {
     secs.push(h("div", {}, h("a", { href: r.registry_url, rel: "noopener noreferrer", target: "_blank", text: "Open the registry page" })));

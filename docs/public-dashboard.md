@@ -28,7 +28,7 @@ A background thread debounces changes (2 s) and uploads with a 5 s timeout. Uplo
 | `live/benchmark.json` | Same shape as `/api/benchmark` | `public, max-age=60` |
 | `live/history/YYYY-MM-DD.json` | Daily pipeline rollup | `max-age=60` for today; `immutable` for past days |
 | `live/confirmed/YYYY-MM-DD.json` | That day’s findings rows with stage labels | same |
-| `live/r/<eco>/<name>/<version>.json` | Same shape as `/api/release` (pop-out) | `max-age=60` |
+| `live/r/<eco>/<name>/<version>.json` | Same shape as `/api/release` (pop-out), without the model id | `max-age=60` |
 
 `<name>` and `<version>` are one path segment each. A slash in the name or version is written as `~` (so `actions/checkout` and `@scope/pkg` are not `%2F`), then the segment is percent-encoded (`@` in `tag@sha12` becomes `%40`). Unscoped keys such as `live/r/pypi/tox/4.64.10.json` and `live/r/npm/vite/8.3.4.json` stay unchanged. A bare `/live/r/github-actions` is not an object key and stays 404.
 

@@ -139,6 +139,15 @@ def public_models(models: Any) -> dict[str, dict[str, Any]]:
     return out
 
 
+def public_release(detail: dict[str, Any]) -> dict[str, Any]:
+    """The release object for the public page, without the model id."""
+    out = copy.deepcopy(detail)
+    summary = out.get("release")
+    if isinstance(summary, dict):
+        summary.pop("scout_model_id", None)
+    return out
+
+
 def _release_segment(value: str) -> str:
     """One path segment. ``/`` becomes ``~`` so the key contains no ``%2F``.
 
@@ -544,7 +553,7 @@ def publish_public_dash(
             if detail is None:
                 continue
             obj_key = release_object_key(eco, name, version)
-            body = _encode(sanitize_public(detail, config))
+            body = _encode(sanitize_public(public_release(detail), config))
             digest = hashlib.sha256(body).hexdigest()
             if db.public_dash_release_hash(key) == digest:
                 continue
