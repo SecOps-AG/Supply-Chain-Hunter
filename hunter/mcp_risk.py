@@ -152,7 +152,7 @@ def _registry_signals(config, loader, ecosystem: str, name: str, version: str, s
     transport = getattr(loader, "transport", None) or http_get
     base = str(getattr(config, "mcp_registry_url", "") or "").rstrip("/")
     try:
-        documents = _version_documents(transport, base, server)
+        documents = _version_documents(transport, base, server, ecosystem, name, version)
     except _RegistryMiss:
         return [], {}, "registry: not found"
     except FeedError as exc:
@@ -173,15 +173,18 @@ def _registry_signals(config, loader, ecosystem: str, name: str, version: str, s
     return signals, detail, ""
 
 
-def _version_documents(transport: HttpGet, base: str, server: str) -> list[dict]:
-    """GET the version list, then each version document. Order is applied later by publication time."""
+def _version_documents(transport: HttpGet, base: str, server: str, ecosystem: str, name: str, version: str) -> list[dict]:
+    """GET the version list, pick the current and previous entries, then GET only those two documents."""
     listed = _list_versions(transport, base, server)
     documents: list[dict] = []
-    for entry in listed:
-        version = str(server_detail(entry).get("version") or entry.get("version") or "")
-        if not version:
+    for entry in select_versions(listed, ecosystem, name, version):
+        if entry is None:
             continue
-        url = f"{base}/v0.1/servers/{quote(server, safe='')}/versions/{quote(version, safe='')}"
+        number = str(server_detail(entry).get("version") or entry.get("version") or "")
+        if not number:
+            documents.append(entry)
+            continue
+        url = f"{base}/v0.1/servers/{quote(server, safe='')}/versions/{quote(number, safe='')}"
         try:
             document = _get_json(transport, url)
         except _RegistryMiss:

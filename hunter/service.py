@@ -667,6 +667,9 @@ def note_decision_model_health(db: Database, config: Config, result: Classificat
         )
         db.mark_decision_model_outage_notified(moment)
         log.error("decision model down since %s; outage webhook queued", outage["started_at"])
+    elif result.jev_model_id == "deterministic":
+        # No model was called, so this row says nothing about the model.
+        return
     elif not decision_model_failed(result) and result.band != "deferred":
         ended = db.clear_decision_model_outage()
         if ended is not None:
@@ -1394,6 +1397,7 @@ def _mcp_catchup_since(previous: str | None, started: datetime) -> str:
     The saved checkpoint is five minutes before the poll that wrote it, so a
     name inserted then is still included an hour later. A missing or future
     checkpoint uses this poll's start: new rows match, older rows are not backfilled.
+    With no checkpoint at all, ``poll_mcp_and_catchup`` skips catch-up.
     """
     start = iso(started)
     parsed = parse_time(previous) if previous else None
@@ -1462,7 +1466,10 @@ def poll_mcp_and_catchup(
     transport: HttpGet = http_get,
     stop: threading.Event | None = None,
 ) -> dict:
-    """One registry poll, then catch-up of names that poll inserted. Returns the summary counts."""
+    """One registry poll, then catch-up of names that poll inserted. Returns the summary counts.
+
+    The first poll (no checkpoint yet) does no catch-up.
+    """
     previous = db.get_checkpoint("mcp")
     started = utcnow()
     pages = 0
@@ -1474,11 +1481,13 @@ def poll_mcp_and_catchup(
         return transport(url, timeout)
 
     added = poll_mcp_registry(db, config, counting, stop)
+    # The first poll stores every listed name; none of them is new, so none is caught up.
     # Catch-up errors stay here. The registry checkpoint is already saved.
-    try:
-        catch_up_mcp_packages(db, config, transport, _mcp_catchup_since(previous, started), started)
-    except Exception as exc:
-        log.warning("MCP catch-up failed: %s", exc)
+    if previous is not None:
+        try:
+            catch_up_mcp_packages(db, config, transport, _mcp_catchup_since(previous, started), started)
+        except Exception as exc:
+            log.warning("MCP catch-up failed: %s", exc)
     counts = db.mcp_counts()
     return {
         "pages": pages,

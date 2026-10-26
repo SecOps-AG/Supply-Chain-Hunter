@@ -235,7 +235,9 @@ def test_registry_versions_are_fetched_and_ordered_by_published_at(tmp_path):
     loader.trees[("npm", "@example/demo", "1.0.0")] = _pair("Look up a query")
     assert score_pending_jobs(db, config, loader) == 1
     assert any(call.startswith(list_url) for call in loader.transport.calls)
-    assert f"{list_url}/1.10.0" in loader.transport.calls
+    # Only the matched version's document is read; it has no earlier version.
+    assert f"{list_url}/1.2.0" in loader.transport.calls
+    assert f"{list_url}/1.10.0" not in loader.transport.calls
     stored = db.mcp_risk("npm", "@example/demo", "1.0.0")
     # The release matches the earlier server's package version, so `latest` on 1.10.0 is not the one scored.
     assert stored["signals"] == []

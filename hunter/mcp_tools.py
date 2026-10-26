@@ -8,13 +8,23 @@ excerpt.
 from __future__ import annotations
 
 import ast
+import itertools
+import logging
 import re
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
+log = logging.getLogger("hunter.mcp_tools")
+
 SOURCE_SUFFIXES = {".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx"}
 MAX_SOURCE_BYTES = 1024 * 1024
+# Bounds on the hand parser, so crafted text cannot make it scan a file once per match.
+MAX_MATCHES = 200
+SCAN_WINDOW = 64 * 1024
+# Wall time one tree's tool extraction may use before the remaining files are skipped.
+EXTRACT_SECONDS = 10.0
 _SKIP_DIRS = {"node_modules", "test", "tests", "__tests__", "harness"}
 _HIDDEN = ("\u200b", "\u200c", "\ufeff", "\u2060", "\u180e")
 _ZWJ = "\u200d"
@@ -63,7 +73,11 @@ def extract_tools(files: Mapping[str, str] | None) -> dict[str, Tool]:
         return found
     sources = list(_sources(files))
     exported = {path: _exported_strings(text) for path, text in sources if Path(path).suffix.lower() != ".py"}
+    deadline = time.monotonic() + EXTRACT_SECONDS
     for path, text in sources:
+        if time.monotonic() > deadline:
+            log.warning("MCP tool extraction stopped after %.0fs; %s and later files skipped", EXTRACT_SECONDS, path)
+            break
         suffix = Path(path).suffix.lower()
         if suffix == ".py":
             tools = _python_tools(text)
@@ -463,7 +477,7 @@ def _field_string(
 
 def _zod_schemas(text: str) -> dict[str, set[str]]:
     schemas: dict[str, set[str]] = {}
-    for match in re.finditer(r"\b([A-Za-z_$][\w$]*)\s*=\s*z\s*\.\s*object\s*\(", text):
+    for match in _capped(re.finditer(r"\b([A-Za-z_$][\w$]*)\s*=\s*z\s*\.\s*object\s*\(", text)):
         args = _split_args(text, match.end() - 1)
         if not args:
             continue
@@ -481,7 +495,7 @@ def _register_tools(
     imports: Mapping[str, str],
 ) -> list[Tool]:
     found: list[Tool] = []
-    for match in re.finditer(r"(?<![\w$])registerTool\s*\(", text):
+    for match in _capped(re.finditer(r"(?<![\w$])registerTool\s*\(", text)):
         args = _split_args(text, match.end() - 1)
         if len(args) < 2:
             continue
@@ -532,7 +546,7 @@ def _tools_arrays(
     imports: Mapping[str, str],
 ) -> list[Tool]:
     found: list[Tool] = []
-    for match in re.finditer(r"(?<![\w$])tools\s*:", text):
+    for match in _capped(re.finditer(r"(?<![\w$])tools\s*:", text)):
         index = _skip_gap(text, match.end())
         if index >= len(text) or text[index] != "[":
             continue
@@ -708,7 +722,7 @@ def _schema_props(text: str, start: int, end: int, schemas: dict[str, set[str]])
         prop_start, prop_end = fields["properties"]
         props |= _object_keys(text, prop_start, prop_end)
     region = text[start:end]
-    for match in re.finditer(r"\bz\s*\.\s*object\s*\(", region):
+    for match in _capped(re.finditer(r"\bz\s*\.\s*object\s*\(", region)):
         args = _split_args(text, start + match.end() - 1)
         if args:
             props |= _object_keys(text, args[0][0], args[0][1])
@@ -790,8 +804,9 @@ def _read_string(text: str, index: int) -> tuple[str, int]:
     quote = text[index]
     index += 1
     out: list[str] = []
+    stop = min(len(text), index + SCAN_WINDOW)
     simple = {"n": "\n", "r": "\r", "t": "\t", "\\": "\\", "'": "'", '"': '"', "`": "`", "/": "/"}
-    while index < len(text):
+    while index < stop:
         ch = text[index]
         if ch == "\\":
             if index + 1 >= len(text):
@@ -842,16 +857,21 @@ def _without_strings(text: str) -> str:
     return "".join(out)
 
 
+def _capped(matches):
+    return itertools.islice(matches, MAX_MATCHES)
+
+
 def _split_args(text: str, paren: int) -> list[tuple[int, int]]:
     if paren >= len(text) or text[paren] != "(":
         return []
     args: list[tuple[int, int]] = []
     index = paren + 1
     start = index
+    stop = min(len(text), paren + SCAN_WINDOW)
     stack = [")"]
     closers = {"}": "{", "]": "[", ")": "("}
     openers = {"{": "}", "[": "]", "(": ")"}
-    while index < len(text):
+    while index < stop:
         if text.startswith("//", index) or text.startswith("/*", index):
             index = _skip_gap(text, index)
             if index < len(text) and text[index] not in " \t\r\n":
@@ -928,8 +948,9 @@ def _skip_bracket(text: str, index: int) -> int:
     if index >= len(text) or text[index] not in openers:
         return index
     stack = [openers[text[index]]]
+    stop = min(len(text), index + SCAN_WINDOW)
     index += 1
-    while index < len(text) and stack:
+    while index < stop and stack:
         if text.startswith("//", index) or text.startswith("/*", index):
             index = _skip_comment(text, index)
             continue
