@@ -501,9 +501,14 @@ def test_cli_offline_prints_summary(tmp_path, monkeypatch, capsys):
     assert cli.main(["ground-truth", "--offline", "--days", "0"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert "items" not in payload
+    assert "openvsx_items" not in payload
     assert payload["summary"]["caught"] == 1
     assert payload["fetched"] is False
     assert (tmp_path / "gt" / REPORT_NAME).exists()
+
+    assert cli.main(["ground-truth", "--offline", "--days", "0", "--full"]) == 0
+    full = json.loads(capsys.readouterr().out)
+    assert "items" in full and "openvsx_items" in full
 
 
 def test_service_skips_fresh_report_and_logs_failures(tmp_path, monkeypatch, caplog):
@@ -529,3 +534,79 @@ def test_service_skips_fresh_report_and_logs_failures(tmp_path, monkeypatch, cap
     monkeypatch.setattr("hunter.ground_truth.run_ground_truth", boom)
     service._ground_truth_safely(None, config, no_network)
     assert "ground truth run failed" in caplog.text
+
+
+def test_openvsx_labels_stay_out_of_recall_and_survive_a_later_active(tmp_path):
+    config = make_config(tmp_path, ground_truth_npm_checks=0)
+    db = Database(config.db_path)
+    try:
+        save(db, "npm", "evil", "1.0.0", "alert", NOW - timedelta(hours=2))
+        save(db, "openvsx", "reviewed.ext", "1.0.0", "review", NOW - timedelta(hours=2))
+        db.save_release(
+            "openvsx",
+            "removed.ext",
+            "1.0.0",
+            "benign",
+            0.0,
+            "none",
+            None,
+            json.dumps({"signals": ["vsx_removed_before_review"]}),
+            when=NOW - timedelta(hours=2),
+        )
+        db.save_release(
+            "openvsx",
+            "idle.ext",
+            "1.0.0",
+            "benign",
+            0.0,
+            "none",
+            None,
+            json.dumps({"signals": ["vsx_inactive_before_review"]}),
+            when=NOW - timedelta(hours=2),
+        )
+        db.record_openvsx_label("removed.ext", "1.0.0", "universal", "removed", "2026-10-01T00:00:00Z")
+        db.record_openvsx_label("idle.ext", "1.0.0", "universal", "inactive", "2026-10-01T01:00:00Z")
+        db.record_openvsx_label("redhat.java", "1.29.0", "universal", "removed", "2026-10-01T02:00:00Z")
+        db.record_openvsx_change(
+            "redhat.java",
+            "1.29.0",
+            "universal",
+            "ACTIVE",
+            "2026-10-01T03:00:00Z",
+            "2026-10-01T03:00:00Z",
+        )
+        assert {(row["name"], row["state"]) for row in db.openvsx_labels()} == {
+            ("idle.ext", "inactive"),
+            ("redhat.java", "removed"),
+            ("removed.ext", "removed"),
+        }
+        source = StaticSource([mal("MAL-1", "npm", "evil", versions=["1.0.0"])])
+        report = run_ground_truth(db, config, source=source, transport=no_network, now=NOW)
+    finally:
+        db.close()
+    summary = report["summary"]
+    assert summary["malicious_seen"] == 1
+    assert summary["caught"] == 1
+    assert summary["missed"] == 0
+    assert {item["ecosystem"] for item in report["items"]} == {"npm"}
+    assert ("openvsx", "reviewed.ext") not in source.seen
+    assert summary["openvsx_registry"] == {
+        "removed": 2,
+        "inactive": 1,
+        "scored": 3,
+        "caught": 1,
+        "not_reviewed": 2,
+    }
+    by_key = {(item["name"], item["version"]): item for item in report["openvsx_items"]}
+    assert by_key[("reviewed.ext", "1.0.0")]["caught"] is True
+    assert by_key[("removed.ext", "1.0.0")]["not_reviewed"] is True
+    assert by_key[("removed.ext", "1.0.0")]["caught"] is False
+    assert by_key[("removed.ext", "1.0.0")]["labels"][0]["state"] == "removed"
+    assert by_key[("idle.ext", "1.0.0")]["not_reviewed"] is True
+    retirement = by_key[("redhat.java", "1.29.0")]
+    assert retirement["band"] is None
+    assert retirement["caught"] is False
+    assert retirement["not_reviewed"] is False
+    assert retirement["labels"] == [
+        {"platform": "universal", "state": "removed", "changed_at": "2026-10-01T02:00:00Z"}
+    ]

@@ -3,9 +3,11 @@
 Open VSX serves VS Code compatible extensions to Cursor, VSCodium, Windsurf and
 others. A release is a ``.vsix`` file, a zip of the extension's JavaScript and
 ``package.json``. Hunter diffs it against the previous version with the same
-rules used for npm. Scout reads a release only when ``HUNTER_OPENVSX_SCOUT`` is
-on and the rule verdict is malicious or a rule hit comes with a manifest change.
-Removals in the feed are recorded as ground truth.
+rules used for npm. A new ``extensionPack`` or ``extensionDependencies`` id
+routes to Triage on its own. Scout reads a release only when
+``HUNTER_OPENVSX_SCOUT`` is on and the rule verdict is malicious or a rule hit
+comes with a manifest change. ``REMOVED`` versions and ``INACTIVE`` versions
+(the unpublished state) are labeled and not downloaded.
 
 Release identity in the shared tables: ecosystem ``openvsx``, name
 ``namespace.extension`` (lower case) and the extension version.

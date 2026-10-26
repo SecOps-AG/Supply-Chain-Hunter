@@ -3,6 +3,8 @@
 The feed is an append-only log of publications, deactivations and removals,
 oldest first. ``since=<ISO time>`` starts it at a moment and ``after=<cursor>``
 continues from a page's ``nextCursor``. The checkpoint holds either form.
+A last page with no cursor continues from ``since:<newest timestamp>``.
+A page that says it has more but has no cursor is an error, and the checkpoint stays.
 """
 
 from __future__ import annotations
@@ -103,29 +105,62 @@ def poll_openvsx(db: Database, config, transport: HttpGet = http_get, stop: thre
                 change.get("lastUpdated"),
             )
             if state == "ACTIVE":
-                result = _queue(db, name, version, config.max_pending)
-                if result == "queued":
-                    queued += 1
-                elif result == "refused":
-                    refused = True
-                    break
-            elif state == "REMOVED" and before != "REMOVED":
-                removed += 1
-                log.info("Open VSX removed %s %s (%s)", name, version, platform)
+                if before == "REMOVED":
+                    # Purged coordinates can be published again. Reopen the done job so the new bytes are reviewed.
+                    opened = db.reopen_job(ECOSYSTEM, name, version, None, max_pending=config.max_pending)
+                    if opened == "refused":
+                        db.record_openvsx_change(
+                            name,
+                            version,
+                            platform,
+                            "REMOVED",
+                            change.get("timestamp"),
+                            change.get("lastUpdated"),
+                        )
+                        refused = True
+                        break
+                    if opened == "reopened":
+                        db.delete_release(ECOSYSTEM, name, version)
+                    if opened in {"reopened", "inserted"}:
+                        queued += 1
+                else:
+                    result = _queue(db, name, version, config.max_pending)
+                    if result == "queued":
+                        queued += 1
+                    elif result == "refused":
+                        refused = True
+                        break
+            elif state in {"REMOVED", "INACTIVE", "UNPUBLISHED"}:
+                # UNPUBLISHED is a spelling of INACTIVE. The label is insert-only; a later ACTIVE leaves it.
+                label = "removed" if state == "REMOVED" else "inactive"
+                changed = change.get("lastUpdated")
+                db.record_openvsx_label(
+                    name,
+                    version,
+                    platform,
+                    label,
+                    None if changed is None else str(changed),
+                )
+                if state == "REMOVED" and before != "REMOVED":
+                    removed += 1
+                    log.info("Open VSX removed %s %s (%s)", name, version, platform)
         if refused:
             log.warning("Open VSX poll paused: pending queue is full")
             break
-        following = page.get("nextCursor")
-        if following and str(following) != checkpoint:
-            checkpoint = str(following)
+        following = str(page.get("nextCursor") or "").strip()
+        has_more = bool(page.get("hasMore"))
+        if following and following != checkpoint:
+            checkpoint = following
             db.set_checkpoint(CHECKPOINT, checkpoint)
+        elif not following and has_more:
+            raise FeedError("Open VSX changes page has more results but no nextCursor")
         elif not following:
-            # A last page with no cursor: start the next poll at its newest change, not the old start.
+            # Only a finished page may fall back to a timestamp. Doing this while more rows remain would skip them.
             latest = _latest_timestamp(changes)
             if latest and f"{SINCE_PREFIX}{latest}" != checkpoint:
                 checkpoint = f"{SINCE_PREFIX}{latest}"
                 db.set_checkpoint(CHECKPOINT, checkpoint)
-        if not page.get("hasMore") or not changes or not following:
+        if not has_more or not changes or not following:
             break
     db.mark_poll_success(CHECKPOINT)
     if queued or removed:

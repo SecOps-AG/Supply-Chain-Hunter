@@ -339,6 +339,133 @@ def test_a_feed_error_raises_and_keeps_the_checkpoint(tmp_path):
     assert db.get_checkpoint(CHECKPOINT) == "c0"
 
 
+def test_a_page_with_a_cursor_stores_that_cursor(tmp_path):
+    db = Database(tmp_path / "hunter.sqlite3")
+    config = _config(tmp_path)
+    db.set_checkpoint(CHECKPOINT, "c0")
+    feed = ChangesFeed(
+        {
+            "c0": {"changes": [_change("p", "a", "1.0.0")], "hasMore": True, "nextCursor": "c9"},
+            "c9": {"changes": [], "hasMore": False},
+        }
+    )
+    assert poll_openvsx(db, config, feed) == 1
+    assert db.get_checkpoint(CHECKPOINT) == "c9"
+
+
+def test_a_cursorless_boundary_is_not_queued_twice(tmp_path):
+    db = Database(tmp_path / "hunter.sqlite3")
+    config = _config(tmp_path)
+    start = f"{SINCE_PREFIX}2026-10-20T00:00:00Z"
+    boundary = f"{SINCE_PREFIX}2026-10-20T03:00:00Z"
+    db.set_checkpoint(CHECKPOINT, start)
+    page = {"changes": [_change("p", "a", "1.0.0", stamp="2026-10-20T03:00:00Z")], "hasMore": False}
+    feed = ChangesFeed({start: page, boundary: page})
+    assert poll_openvsx(db, config, feed) == 1
+    assert db.get_checkpoint(CHECKPOINT) == boundary
+    assert poll_openvsx(db, config, feed) == 0
+    assert db.pending_count() == 1
+
+
+def test_a_truncated_page_without_a_cursor_keeps_the_checkpoint(tmp_path):
+    db = Database(tmp_path / "hunter.sqlite3")
+    db.set_checkpoint(CHECKPOINT, "c0")
+    page = {
+        "changes": [_change("p", "a", "1.0.0", stamp="2026-10-20T03:00:00Z")],
+        "hasMore": True,
+    }
+    with pytest.raises(FeedError):
+        poll_openvsx(db, _config(tmp_path), ChangesFeed({"c0": page}))
+    assert db.get_checkpoint(CHECKPOINT) == "c0"
+
+
+def test_inactive_and_unpublished_are_labels_and_not_jobs(tmp_path):
+    db = Database(tmp_path / "hunter.sqlite3")
+    config = _config(tmp_path, openvsx=True)
+    db.set_checkpoint(CHECKPOINT, "c0")
+    page = {
+        "changes": [
+            _change("p", "sleep", "1.0.0", state="INACTIVE"),
+            _change("p", "old", "2.0.0", state="UNPUBLISHED"),
+        ],
+        "hasMore": False,
+        "nextCursor": "c1",
+    }
+    assert poll_openvsx(db, config, ChangesFeed({"c0": page})) == 0
+    assert db.pending_count() == 0
+    assert {(row["name"], row["state"]) for row in db.openvsx_labels()} == {
+        ("p.old", "inactive"),
+        ("p.sleep", "inactive"),
+    }
+    counts = db.openvsx_counts()
+    assert counts == {"active": 0, "removed": 0, "other": 2}
+    health = health_payload(db, 0.0, config=config)
+    assert health["openvsx"] == counts
+
+
+def test_a_removal_labels_the_version_at_last_updated(tmp_path):
+    db = Database(tmp_path / "hunter.sqlite3")
+    db.set_checkpoint(CHECKPOINT, "c0")
+    change = _change("p", "gone", "1.2.3", state="REMOVED", stamp="2026-10-20T01:00:00Z")
+    change["lastUpdated"] = "2026-10-21T05:06:07.000Z"
+    page = {"changes": [change], "hasMore": False, "nextCursor": "c1"}
+    assert poll_openvsx(db, _config(tmp_path), ChangesFeed({"c0": page})) == 0
+    labels = db.openvsx_labels()
+    assert len(labels) == 1
+    assert labels[0]["name"] == "p.gone" and labels[0]["version"] == "1.2.3"
+    assert labels[0]["state"] == "removed"
+    assert labels[0]["changed_at"] == "2026-10-21T05:06:07.000Z"
+    assert db.pending_count() == 0
+
+
+def test_removed_then_active_reopens_unless_the_queue_is_full(tmp_path):
+    db = Database(tmp_path / "hunter.sqlite3")
+    config = _config(tmp_path)
+    db.set_checkpoint(CHECKPOINT, "c0")
+    removed = _change("p", "a", "1.0.0", state="REMOVED", stamp="2026-10-21T00:00:00Z")
+    removed["lastUpdated"] = "2026-10-21T00:00:00Z"
+    feed = ChangesFeed(
+        {
+            "c0": {"changes": [_change("p", "a", "1.0.0")], "hasMore": False, "nextCursor": "c1"},
+            "c1": {"changes": [removed], "hasMore": False, "nextCursor": "c2"},
+            "c2": {"changes": [_change("p", "a", "1.0.0", stamp="2026-10-22T00:00:00Z")], "hasMore": False, "nextCursor": "c3"},
+        }
+    )
+    assert poll_openvsx(db, config, feed) == 1
+    db.save_release(ECOSYSTEM, "p.a", "1.0.0", "benign", 0.0, "none", None, "{}")
+    db.finish_job(ECOSYSTEM, "p.a", "1.0.0")
+    assert poll_openvsx(db, config, feed) == 0
+    assert db.openvsx_labels()[0]["state"] == "removed"
+    assert db.get_release(ECOSYSTEM, "p.a", "1.0.0") is not None
+    assert poll_openvsx(db, config, feed) == 1
+    assert db.get_checkpoint(CHECKPOINT) == "c3"
+    assert [(job["name"], job["version"]) for job in db.pending_jobs()] == [("p.a", "1.0.0")]
+    assert db.get_release(ECOSYSTEM, "p.a", "1.0.0") is None
+    assert db.openvsx_labels()[0]["changed_at"] == "2026-10-21T00:00:00Z"
+
+    db.save_release(ECOSYSTEM, "p.a", "1.0.0", "benign", 0.0, "none", None, "{}")
+    db.finish_job(ECOSYSTEM, "p.a", "1.0.0")
+    db.enqueue_job("npm", "filler", "1.0.0", None)
+    full = _config(tmp_path, max_pending=1)
+    blocked = ChangesFeed(
+        {
+            "c3": {"changes": [removed], "hasMore": False, "nextCursor": "c4"},
+            "c4": {
+                "changes": [_change("p", "a", "1.0.0", stamp="2026-10-23T00:00:00Z")],
+                "hasMore": False,
+                "nextCursor": "c5",
+            },
+        }
+    )
+    assert poll_openvsx(db, full, blocked) == 0
+    assert db.get_checkpoint(CHECKPOINT) == "c4"
+    assert poll_openvsx(db, full, blocked) == 0
+    assert db.get_checkpoint(CHECKPOINT) == "c4"
+    assert db.get_release(ECOSYSTEM, "p.a", "1.0.0") is not None
+    assert [(job["ecosystem"], job["name"]) for job in db.pending_jobs()] == [("npm", "filler")]
+    assert db.openvsx_platforms("p.a", "1.0.0")["universal"] == "REMOVED"
+
+
 # --- Open VSX review ----------------------------------------------------------
 
 
@@ -419,8 +546,14 @@ def test_predecessor_and_manifest_signals():
     assert predecessor(document, "1.9.0") is None
     old = {"extension/package.json": _manifest()}
     new = {"extension/package.json": _manifest(extensionPack=["evil.twin"], activationEvents=["*"])}
-    assert manifest_signals(old, new) == ["vsx_extension_pack_added", "vsx_activation_widened"]
-    assert manifest_signals({}, new) == []
+    assert manifest_signals(old, new) == [
+        "vsx_extension_pack_added",
+        "vsx_pulls:evil.twin",
+        "vsx_activation_widened",
+    ]
+    # A first publish has no old manifest: the pack still signals, activation does not.
+    assert manifest_signals({}, new) == ["vsx_extension_pack_added", "vsx_pulls:evil.twin"]
+    assert predecessor({"allVersions": {"1.10.0": "u", "1.9.0": "u"}}, "1.10.0") == "1.9.0"
 
 
 def test_a_bundler_move_of_main_is_not_a_medium_signal():
@@ -556,6 +689,107 @@ def test_a_download_failure_is_deferred_for_retry(tmp_path):
     _run(db, config, down)
     assert _payload(db, "1.0.0")["band"] == "deferred"
     assert db.retry_depth() == 1
+
+
+def test_a_new_pack_id_routes_on_its_own(tmp_path):
+    for key in ("extensionPack", "extensionDependencies"):
+        db = Database(tmp_path / f"{key}.sqlite3")
+        config = _config(tmp_path, openvsx=True, investigate_command="unused", smart_analysis=True)
+        assert config.openvsx_scout is False
+        api = OpenVsxApi(
+            {
+                "1.0.0": {"package.json": _manifest(), "out/extension.js": "exports.activate = () => {};\n"},
+                "1.1.0": {
+                    "package.json": _manifest(**{key: ["Evil.Twin"]}),
+                    "out/extension.js": "exports.activate = () => {};\n",
+                },
+            }
+        )
+        _queue(db, "1.1.0")
+        _run(db, config, api)
+        row = _payload(db, "1.1.0")
+        assert row["band"] == "review"
+        assert row["jev_model_id"] == "deterministic"
+        assert "vsx_extension_pack_added" in row["signals"]
+        assert "vsx_pulls:evil.twin" in row["signals"]
+        assert not any(signal.startswith("rule:") for signal in row["signals"])
+        assert db.investigation_depth() == 1
+        assert not any("evil.twin" in url for url in api.urls)
+
+
+def test_pack_ids_signal_only_when_they_are_new():
+    old = {"extension/package.json": _manifest(extensionPack=["Pub.Ext", "Other.Tool"])}
+    same = {"extension/package.json": _manifest(extensionPack=["other.tool", "pub.ext"])}
+    assert manifest_signals(old, same) == []
+    removed = {"extension/package.json": _manifest(extensionPack=["pub.ext"])}
+    assert manifest_signals(old, removed) == []
+    added = {"extension/package.json": _manifest(extensionDependencies=["pub.ext", "Evil.Twin"])}
+    base = {"extension/package.json": _manifest(extensionDependencies=["pub.ext"])}
+    assert manifest_signals(base, added) == ["vsx_extension_pack_added", "vsx_pulls:evil.twin"]
+    dropped = {"extension/package.json": _manifest(extensionPack=["ok.keep", "bad/name", "a..b", "../x"])}
+    kept = {"extension/package.json": _manifest(extensionPack=["ok.keep"])}
+    assert manifest_signals(kept, dropped) == ["vsx_extension_pack_added"]
+    many = [f"p.{index:02d}" for index in range(21)]
+    packed = {"extension/package.json": _manifest(extensionPack=many)}
+    signals = manifest_signals(kept, packed)
+    pulls = [signal for signal in signals if signal.startswith("vsx_pulls:")]
+    assert signals[0] == "vsx_extension_pack_added"
+    assert len(pulls) == 20
+    assert "vsx_pulls:p.20" not in signals
+    assert routes(["vsx_extension_pack_added"], RuleReport())
+    assert routes(["vsx_extension_pack_added"], None)
+    assert not routes(["vsx_pulls:evil.twin"], RuleReport())
+    assert not routes(["vsx_activation_widened"], RuleReport())
+
+
+def test_a_first_version_pack_signals_and_an_empty_one_stays_benign(tmp_path):
+    db = Database(tmp_path / "hunter.sqlite3")
+    config = _config(tmp_path, openvsx=True, investigate_command="unused", smart_analysis=True)
+    packed = OpenVsxApi({"1.0.0": {"package.json": _manifest(extensionPack=["evil.twin"])}})
+    _queue(db, "1.0.0")
+    _run(db, config, packed)
+    row = _payload(db, "1.0.0")
+    assert row["band"] == "review"
+    assert {"vsx_first_version", "vsx_extension_pack_added", "vsx_pulls:evil.twin"} <= set(row["signals"])
+    assert "vsx_activation_widened" not in row["signals"]
+
+    quiet_db = Database(tmp_path / "quiet.sqlite3")
+    quiet = OpenVsxApi({"1.0.0": {"package.json": _manifest()}})
+    _queue(quiet_db, "1.0.0")
+    _run(quiet_db, config, quiet)
+    quiet_row = _payload(quiet_db, "1.0.0")
+    assert quiet_row["band"] == "benign"
+    assert quiet_row["signals"] == ["vsx_first_version"]
+    assert quiet_db.investigation_depth() == 0
+
+
+def test_a_stored_predecessor_platform_is_tried_before_giving_up(tmp_path):
+    db = Database(tmp_path / "hunter.sqlite3")
+    config = _config(tmp_path, openvsx=True)
+    api = OpenVsxApi(
+        {"1.0.0": {"package.json": _manifest()}, "2.0.0": {"package.json": _manifest()}},
+        builds={"1.0.0": "alpine-arm64"},
+    )
+    db.record_openvsx_change("pub.ext", "1.0.0", "alpine-arm64", "INACTIVE", None, None)
+    _queue(db, "2.0.0")
+    _run(db, config, api)
+    row = _payload(db, "2.0.0")
+    assert row["band"] == "benign" and row["old_version"] == "1.0.0"
+    assert any("/alpine-arm64/1.0.0" in url for url in api.urls)
+
+
+def test_inactive_before_review_is_not_downloaded(tmp_path):
+    for state in ("INACTIVE", "UNPUBLISHED"):
+        db = Database(tmp_path / f"{state}.sqlite3")
+        config = _config(tmp_path, openvsx=True)
+        _queue(db, "1.0.0")
+        db.record_openvsx_change("pub.ext", "1.0.0", "universal", state, None, None)
+        api = OpenVsxApi({})
+        _run(db, config, api)
+        assert api.urls == []
+        row = _payload(db, "1.0.0")
+        assert row["band"] == "benign"
+        assert row["signals"] == ["vsx_inactive_before_review"]
 
 
 def test_open_vsx_reads_npm_rules_and_not_pypi_only_rules():

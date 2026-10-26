@@ -339,7 +339,8 @@ class Config:
     mcp_registry_url: str = MCP_REGISTRY_URL
     mcp_poll_interval: float = 3600.0
     # Open VSX extensions through the registry changes feed (HUNTER_OPENVSX). Off by default.
-    # Rules read every release; with HUNTER_OPENVSX_SCOUT on, Scout reads a malicious verdict or a hit with a manifest change.
+    # Rules read every release. A new extensionPack or extensionDependencies id routes on its own.
+    # With HUNTER_OPENVSX_SCOUT on, Scout reads a malicious verdict or a hit with a manifest change.
     openvsx: bool = False
     openvsx_url: str = OPENVSX_URL
     openvsx_poll_interval: float = 300.0

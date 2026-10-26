@@ -378,7 +378,8 @@ def _cmd_ground_truth(args, config: Config) -> int:
         )
     finally:
         db.close()
-    payload = report if args.full else {key: value for key, value in report.items() if key != "items"}
+    hidden = {"items", "openvsx_items"}
+    payload = report if args.full else {key: value for key, value in report.items() if key not in hidden}
     json.dump(payload, sys.stdout, indent=2, sort_keys=True)
     sys.stdout.write("\n")
     return 0
