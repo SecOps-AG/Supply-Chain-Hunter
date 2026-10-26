@@ -93,6 +93,7 @@ Commonly used settings:
 - `HUNTER_MCP_REGISTRY=on`: also watch the npm and PyPI packages listed in the official MCP server registry.
 - `HUNTER_OPENVSX=on`: also watch Open VSX extension releases.
 - `HUNTER_RUBYGEMS=on`: also watch RubyGems releases.
+- `HUNTER_CRATES=on`: also watch crates.io releases.
 
 The full list, with defaults, is in [docs/configuration.md](docs/configuration.md).
 

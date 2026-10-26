@@ -67,6 +67,7 @@ INSTALL_NAMES = {
     "package.json",
     "binding.gyp",
     "install.sh",
+    "build.rs",
 }
 SOURCE_EXT = {
     ".py",
@@ -85,6 +86,7 @@ SOURCE_EXT = {
     ".pth",
     ".bat",
     ".cmd",
+    ".rs",
 }
 DOC_EXT = {".md", ".rst", ".txt", ".adoc", ".html"}
 

@@ -35,7 +35,7 @@ from hunter.registry import USER_AGENT, FeedError, HttpGet, http_get, normalize_
 
 log = logging.getLogger("hunter.ground_truth")
 
-ECOSYSTEMS = {"npm": "npm", "pypi": "PyPI"}
+ECOSYSTEMS = {"npm": "npm", "pypi": "PyPI", "crates": "crates.io"}
 OSV_ECOSYSTEMS = {value.lower(): key for key, value in ECOSYSTEMS.items()}
 NPM_HOLDER_VERSION = "0.0.1-security"
 OSV_BATCH = 1000
@@ -44,7 +44,7 @@ OSV_MAX_PAGES = 10
 MAX_RECORD_BYTES = 2 * 1024 * 1024
 REPORT_NAME = "ground-truth-report.json"
 TAKEDOWN_CACHE = "npm-takedowns.json"
-GIT_SPARSE_PATHS = ("osv/malicious/npm", "osv/malicious/pypi")
+GIT_SPARSE_PATHS = ("osv/malicious/npm", "osv/malicious/pypi", "osv/malicious/crates.io")
 GIT_TIMEOUT = 1800.0
 CAUGHT_BANDS = {"review", "alert"}
 _OPENVSX_NOT_REVIEWED = {"vsx_removed_before_review", "vsx_inactive_before_review"}
@@ -180,7 +180,7 @@ def normalize_name(ecosystem: str, name: str) -> str:
 
 
 def parse_mal_record(document: object) -> MalRecord | None:
-    """One OSV JSON object, or None when it is not a live npm or PyPI MAL- record."""
+    """One OSV JSON object, or None when it is not a live npm, PyPI, or crates.io MAL- record."""
     if not isinstance(document, dict):
         return None
     record_id = str(document.get("id") or "")
@@ -301,7 +301,7 @@ class OsvApiSource:
 
 
 class OsvGitSource:
-    """Shallow, sparse checkout of the malicious-packages repo: only the npm and PyPI folders.
+    """Shallow, sparse checkout of the malicious-packages repo: npm, PyPI, and crates.io folders.
 
     Records are read for the packages Hunter saw, by folder name. Files are parsed as
     JSON only; symlinks and oversized files are skipped.
@@ -336,8 +336,10 @@ class OsvGitSource:
             if ecosystem == "pypi":
                 folder = pypi_dirs.get(normalize_pypi_name(name))
             else:
-                folder = root / "npm" / name
-                if ".." in Path(name).parts or not _inside(folder, root / "npm"):
+                folder_name = "crates.io" if ecosystem == "crates" else "npm"
+                base = root / folder_name
+                folder = base / name
+                if ".." in Path(name).parts or not _inside(folder, base):
                     folder = None
             if folder is None or not folder.is_dir() or folder.is_symlink():
                 continue

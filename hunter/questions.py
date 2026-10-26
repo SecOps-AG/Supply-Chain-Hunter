@@ -66,7 +66,7 @@ _TASKS = {
         "Does diff_excerpt show a persistence path such as cron, a shell rc file, or an SSH authorized_keys edit?"
     ),
     "install_time_execution": (
-        "Does diff_excerpt show install-time execution, such as an npm lifecycle script or a packaging install command?"
+        "Does diff_excerpt show install-time execution, such as an npm lifecycle script, a packaging install command, a Rust build.rs script, or a proc-macro crate?"
     ),
     "unrelated_new_dependency": (
         "Does diff_excerpt add a dependency whose name is unrelated to the package's stated purpose, "

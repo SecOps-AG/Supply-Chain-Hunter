@@ -43,7 +43,7 @@ _LIVE_OBJECT = (
     rf"^{LIVE_PREFIX}benchmark\.json$|"
     rf"^{LIVE_PREFIX}history/{_DATE}\.json$|"
     rf"^{LIVE_PREFIX}confirmed/{_DATE}\.json$|"
-    rf"^{LIVE_PREFIX}r/(npm|pypi|github-actions|openvsx|rubygems)/[^/]+/[^/]+\.json$"
+    rf"^{LIVE_PREFIX}r/(npm|pypi|github-actions|openvsx|rubygems|crates)/[^/]+/[^/]+\.json$"
 )
 LIMITED_REVIEW_TEXT = "Hunter did not read the entire release."
 NPM_REGISTRY = "https://www.npmjs.com/"
@@ -51,7 +51,8 @@ PYPI_REGISTRY = "https://pypi.org/"
 GITHUB_SITE = "https://github.com/"
 OPENVSX_SITE = "https://open-vsx.org/extension/"
 RUBYGEMS_SITE = "https://rubygems.org/gems/"
-ECOSYSTEMS = frozenset({"npm", "pypi", "github-actions", "openvsx", "rubygems"})
+CRATES_SITE = "https://crates.io/crates/"
+ECOSYSTEMS = frozenset({"npm", "pypi", "github-actions", "openvsx", "rubygems", "crates"})
 
 # Closed labels from the suspected-cause question. Unknown and free text stay out.
 PUBLIC_CAUSES = {
@@ -101,6 +102,8 @@ def public_registry_url(ecosystem: str, raw: object) -> str:
     if ecosystem == "openvsx" and url.startswith(OPENVSX_SITE):
         return url
     if ecosystem == "rubygems" and url.startswith(RUBYGEMS_SITE):
+        return url
+    if ecosystem == "crates" and url.startswith(CRATES_SITE):
         return url
     return ""
 
@@ -203,6 +206,8 @@ def ecosystem_label(ecosystem: str) -> str:
         return "Open VSX"
     if ecosystem == "rubygems":
         return "RubyGems"
+    if ecosystem == "crates":
+        return "Crates"
     return "npm"
 
 

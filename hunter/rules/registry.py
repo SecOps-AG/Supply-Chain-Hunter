@@ -17,7 +17,7 @@ PROMOTED_PATH = RULE_DIR / "promoted.json"
 TIERS = {"weak", "info"}
 # "both" means npm and PyPI. "actions" rules read only GitHub Actions releases,
 # and an Actions release reads every rule, since an action's code is JS, Python or shell.
-ECOS = {"npm", "pypi", "both", "actions", "rubygems"}
+ECOS = {"npm", "pypi", "both", "actions", "rubygems", "crates"}
 ACTIONS_ECOSYSTEM = "github-actions"
 # An Open VSX extension is JavaScript with a package.json, so it reads the npm rules.
 OPENVSX_ECOSYSTEM = "openvsx"
@@ -51,6 +51,10 @@ class RuleSpec:
             return self.eco in {"both", "npm"}
         if ecosystem == RUBYGEMS_ECOSYSTEM:
             return self.eco in {"both", "rubygems"}
+        if ecosystem == "crates":
+            if self.eco == "crates":
+                return True
+            return self.eco == "both" and "shell" in classes
         return self.eco == "both" or self.eco == ecosystem
 
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextvars
+from contextlib import contextmanager
 from pathlib import PurePosixPath
 
 JS_EXT = {".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".mts", ".cts"}
@@ -20,6 +22,7 @@ LOCKFILES = {
     "poetry.lock",
     "pipfile.lock",
     "uv.lock",
+    "cargo.lock",
 }
 AGENT_CONFIG = (
     ".claude/settings.json",
@@ -56,9 +59,29 @@ CLASSES = {
     "map",
     "lockfile",
     "other_text",
+    "rust",
+    "rust_build",
+    "rust_manifest",
 }
 _RB_EXT = {".rb", ".rake", ".gemspec"}
 _RB_NAMES = {"rakefile", "gemfile"}
+
+# Paths a Cargo.toml `[package] build` key names. Set for the duration of one scan.
+_RUST_BUILD: contextvars.ContextVar[frozenset[str]] = contextvars.ContextVar(
+    "hunter_rust_build_paths",
+    default=frozenset(),
+)
+
+
+@contextmanager
+def rust_build_paths(paths):
+    """Treat these paths as ``rust_build`` for the scan on this thread."""
+    normalized = frozenset(str(path).lower().replace("\\", "/") for path in paths)
+    token = _RUST_BUILD.set(normalized)
+    try:
+        yield
+    finally:
+        _RUST_BUILD.reset(token)
 
 
 def expand(scope: str) -> frozenset[str]:
@@ -119,6 +142,14 @@ def _is_gem_hook(lowered: str, name: str, hook_paths) -> bool:
 
 def file_classes(path: str, text: str = "", *, hook_paths=None) -> frozenset[str]:
     """Scope classes for one file. Empty means no rule reads it."""
+    found = _file_classes(path, text, hook_paths=hook_paths)
+    lowered = path.lower().replace("\\", "/")
+    if lowered in _RUST_BUILD.get():
+        return found | {"rust_build"}
+    return found
+
+
+def _file_classes(path: str, text: str = "", *, hook_paths=None) -> frozenset[str]:
     lowered = path.lower().replace("\\", "/")
     pure = PurePosixPath(lowered)
     classes = set(_base_classes(path, text))
@@ -150,6 +181,12 @@ def _base_classes(path: str, text: str = "") -> frozenset[str]:
         return frozenset({"py", "py_manifest"})
     if name in {"setup.cfg", "pyproject.toml"}:
         return frozenset({"py_manifest"})
+    if name == "cargo.toml":
+        return frozenset({"rust_manifest"})
+    if suffix == ".rs":
+        if name == "build.rs":
+            return frozenset({"rust", "rust_build"})
+        return frozenset({"rust"})
     if name == "binding.gyp" or suffix == ".gypi":
         return frozenset({"gyp"})
     if lowered.endswith(AGENT_CONFIG):
