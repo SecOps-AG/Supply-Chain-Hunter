@@ -274,6 +274,24 @@ def test_r2_client_uses_the_auto_region(monkeypatch):
     assert captured["kwargs"]["aws_secret_access_key"] == "secret-key-9f3a"
 
 
+def test_r2_client_timeout_bounds_each_request(monkeypatch):
+    captured = {}
+    boto3 = types.ModuleType("boto3")
+    boto3.client = lambda name, **kwargs: captured.update(kwargs) or object()
+    botocore = types.ModuleType("botocore")
+    botocore_config = types.ModuleType("botocore.config")
+    botocore_config.Config = lambda **kwargs: kwargs
+    monkeypatch.setitem(sys.modules, "boto3", boto3)
+    monkeypatch.setitem(sys.modules, "botocore", botocore)
+    monkeypatch.setitem(sys.modules, "botocore.config", botocore_config)
+    make_r2_client(_feed_config(), timeout=5.0)
+    assert captured["config"]["connect_timeout"] == 5.0
+    assert captured["config"]["read_timeout"] == 5.0
+    captured.clear()
+    make_r2_client(_feed_config())
+    assert "config" not in captured
+
+
 def test_feed_limit_keeps_older_rows_in_sqlite_only(tmp_path):
     db = Database(tmp_path / "hunter.sqlite3")
     record_public_alert(db, _evidence(package="older", new_version="1"), when=EARLY)

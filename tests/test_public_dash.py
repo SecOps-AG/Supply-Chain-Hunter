@@ -171,6 +171,98 @@ def test_publish_uploads_live_and_release_objects(db):
     assert publish_public_dash(db, config, started=started, meter=None, client=client, now=moment) is False
 
 
+def test_failed_release_upload_is_retried_next_pass(db):
+    config = _dash_config()
+    client = MagicMock()
+    moment = utcnow()
+    started = time.monotonic()
+    failed: list[str] = []
+
+    def put_object(**kwargs):
+        if kwargs["Key"].startswith("live/r/") and not failed:
+            failed.append(kwargs["Key"])
+            raise TimeoutError("read timed out")
+
+    client.put_object.side_effect = put_object
+    assert publish_public_dash(db, config, started=started, meter=None, client=client, now=moment) is False
+    assert failed
+    client.put_object.reset_mock()
+    assert publish_public_dash(db, config, started=started, meter=None, client=client, now=moment) is True
+    keys = [call.kwargs["Key"] for call in client.put_object.call_args_list]
+    assert failed[0] in keys
+    assert LIVE_JSON_KEY not in keys
+    client.put_object.reset_mock()
+    assert publish_public_dash(db, config, started=started, meter=None, client=client, now=moment) is False
+    assert client.put_object.call_count == 0
+
+
+def test_live_hash_kept_when_only_a_release_upload_fails(db):
+    config = _dash_config()
+    client = MagicMock()
+    moment = utcnow()
+
+    def put_object(**kwargs):
+        if kwargs["Key"].startswith("live/r/"):
+            raise TimeoutError("read timed out")
+
+    client.put_object.side_effect = put_object
+    assert publish_public_dash(db, config, started=time.monotonic(), meter=None, client=client, now=moment) is False
+    state = db.public_dash_state()
+    assert state["live_hash"]
+    assert state["benchmark_hash"]
+    assert "TimeoutError" in (state["last_error"] or "")
+
+
+def test_release_objects_are_not_cached_as_immutable(db):
+    config = _dash_config()
+    client = MagicMock()
+    assert publish_public_dash(db, config, started=time.monotonic(), meter=None, client=client, now=utcnow()) is True
+    release_calls = [c.kwargs for c in client.put_object.call_args_list if c.kwargs["Key"].startswith("live/r/")]
+    assert release_calls
+    for call in release_calls:
+        assert call["CacheControl"] == "public, max-age=60"
+        assert "immutable" not in call["CacheControl"]
+
+
+def _published_release(db, name):
+    client = MagicMock()
+    publish_public_dash(db, _dash_config(), started=time.monotonic(), meter=None, client=client, now=utcnow())
+    for call in client.put_object.call_args_list:
+        if call.kwargs["Key"] == release_object_key("npm", name, "2.0.0"):
+            return json.loads(call.kwargs["Body"])
+    raise AssertionError(f"no release object uploaded for {name}")
+
+
+def _all_keys(value):
+    if isinstance(value, dict):
+        for key, item in value.items():
+            yield key
+            yield from _all_keys(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _all_keys(item)
+
+
+def test_published_release_object_keeps_public_fields(db):
+    body = _published_release(db, "<b>demo-html</b>")
+    summary = body["release"]
+    for key in ("band", "p", "signals", "created_at"):
+        assert key in summary
+    assert [(hit["rule"], hit["tier"], hit["path"]) for hit in summary["rule_hits"]] == [
+        ("net_oast_host", "strong", "package.json")
+    ]
+    assert body["triage"]["verdict"] == "malicious"
+    assert body["analyst"]["verdict"] == "malicious"
+
+
+def test_published_release_object_omits_model_id_and_keeps_reports(db):
+    body = _published_release(db, "<b>demo-html</b>")
+    assert "scout_model_id" not in set(_all_keys(body))
+    assert not any("model_id" in key for key in _all_keys(body))
+    assert body["triage"]["report"]
+    assert body["analyst"]["report"]
+
+
 def test_put_feed_object_refuses_unknown_keys():
     client = MagicMock()
     with pytest.raises(ValueError, match="non-public"):

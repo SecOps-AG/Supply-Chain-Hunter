@@ -340,16 +340,29 @@ def r2_endpoint(account_id: str) -> str:
     return f"https://{account_id}.r2.cloudflarestorage.com"
 
 
-def make_r2_client(config: Config):
-    """S3 client for the R2 bucket. ``region_name`` must be ``auto``."""
+def make_r2_client(config: Config, *, timeout: float | None = None):
+    """S3 client for the R2 bucket. ``region_name`` must be ``auto``.
+
+    ``timeout`` bounds each request's connect and read, with one retry.
+    """
     import boto3
 
+    kwargs: dict = {}
+    if timeout is not None:
+        from botocore.config import Config as BotoConfig
+
+        kwargs["config"] = BotoConfig(
+            connect_timeout=timeout,
+            read_timeout=timeout,
+            retries={"total_max_attempts": 2},
+        )
     return boto3.client(
         "s3",
         endpoint_url=r2_endpoint(config.feed_r2_account_id),
         aws_access_key_id=config.feed_r2_access_key_id,
         aws_secret_access_key=config.feed_r2_secret_access_key,
         region_name="auto",
+        **kwargs,
     )
 
 
