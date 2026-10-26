@@ -8,6 +8,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import cached_property
+from collections.abc import Collection
 from pathlib import PurePosixPath
 
 from ..archives import BINARY_MARKER, FILE_CUT_MARKER, MEDIA_SUFFIXES
@@ -145,12 +146,14 @@ class _ReleaseScan:
         new_files: Mapping[str, str],
         ecosystem: str | None,
         diffs: Mapping[str, str] | None,
+        hook_paths: Collection[str] | None = None,
     ):
         self.pack = pack
         self.old_files = old_files
         self.new_files = new_files
         self.ecosystem = ecosystem
         self.diffs = diffs or {}
+        self.hook_paths = hook_paths
         self.report = RuleReport(pack_version=pack.version)
         self._old_by_name: dict[str, list[str]] | None = None
 
@@ -220,7 +223,7 @@ class _ReleaseScan:
             else:
                 self.report.unscanned.append((path, reason))
             return
-        classes = file_classes(path, new)
+        classes = file_classes(path, new, hook_paths=self.hook_paths)
         specs = [spec for spec in self.pack.specs.values() if spec.reads(classes, self.ecosystem)]
         if not specs:
             return
@@ -308,6 +311,11 @@ def scan_release(
     *,
     ecosystem: str | None = None,
     diffs: Mapping[str, str] | None = None,
+    hook_paths: Collection[str] | None = None,
 ) -> RuleReport:
-    """Scan the text this release added. `diffs` reuses unified diffs already made by triage."""
-    return _ReleaseScan(load_pack(), old_files, new_files, ecosystem, diffs).scan()
+    """Scan the text this release added. `diffs` reuses unified diffs already made by triage.
+
+    ``hook_paths`` are gemspec ``extensions`` entries. Those files, and any
+    ``extconf.rb``, are class ``gem_hook`` for this scan.
+    """
+    return _ReleaseScan(load_pack(), old_files, new_files, ecosystem, diffs, hook_paths).scan()

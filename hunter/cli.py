@@ -23,6 +23,7 @@ from hunter.llm import ModelCallError
 from hunter.openrouter import list_openrouter_models
 from hunter.spend import SpendMeter
 from hunter.teach import TeachRefused, discover_fixture, run_teach, write_axios_distillation, write_teach_report
+from hunter.rubygems.review import score_versions
 from hunter.service import FeedStart, ReleaseLoader, apply_feed_start, classify_observed, run_cycle, serve
 from hunter.train import train_live
 
@@ -137,6 +138,16 @@ def _cmd_scan(args, config: Config) -> int:
 
 
 def _cmd_score(args, config: Config) -> int:
+    if args.ecosystem == "rubygems" and not (args.old_archive or args.new_archive):
+        if not (args.name and args.old and args.new):
+            print("score needs --ecosystem, --name, --old, and --new, or two archives", file=sys.stderr)
+            return 2
+        scout = None
+        if config.rubygems_scout:
+            require_scoring_layer(config)
+            scout = make_scout_model(config)
+        _print_result(score_versions(config, args.name, args.old, args.new, jev=scout))
+        return 0
     require_scoring_layer(config)
     jev = make_scout_model(config)
     if args.old_archive or args.new_archive:
@@ -409,7 +420,7 @@ def build_parser() -> argparse.ArgumentParser:
     scan.set_defaults(func=_cmd_scan)
 
     score = sub.add_parser("score", help="classify two versions or two local archives")
-    score.add_argument("--ecosystem", choices=("pypi", "npm"))
+    score.add_argument("--ecosystem", choices=("pypi", "npm", "rubygems"))
     score.add_argument("--name")
     score.add_argument("--old")
     score.add_argument("--new")
