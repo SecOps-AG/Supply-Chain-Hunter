@@ -22,7 +22,7 @@ from hunter.actions import ECOSYSTEM as ACTIONS_ECOSYSTEM
 from hunter.actions.github import GitHubClient, RateLimited
 from hunter.actions.poller import poll_actions
 from hunter.actions.review import MODEL_ID as ACTIONS_RULES_MODEL, classify_action
-from hunter.actions.watchlist import refresh_actions_watchlist
+from hunter.actions.watchlist import probe_ecosyste, refresh_actions_watchlist
 from hunter.mcp_registry import POLL_NAME as MCP_POLL_NAME, poll_mcp_registry
 from hunter.openvsx import ECOSYSTEM as OPENVSX_ECOSYSTEM
 from hunter.openvsx.feed import poll_openvsx
@@ -60,7 +60,7 @@ from hunter.scout_lessons import scout_lesson_suppresses
 from hunter.scout_model import DEFAULT_SCOUT_MODEL, make_scout_model, require_scoring_layer
 from hunter.spend import SpendMeter
 from hunter.config import Config, active_role_models, smart_analysis_enabled
-from hunter.db import Database, utcnow
+from hunter.db import Database, iso, utcnow
 from hunter.jev import JevUnavailable
 from hunter.models import Classification, ReleaseMeta
 from hunter.logging_setup import configure_logging
@@ -97,6 +97,42 @@ from hunter.webhook import build_payload, drain_outbox, dump_body, enqueue_decis
 log = logging.getLogger("hunter.service")
 
 _dash_publisher = None
+# Latest ecosyste.ms probe. /health reads it; the probe never runs inside /health.
+_ecosyste_probe: dict[str, object] = {"ok": False, "checked_at": None, "error": None}
+_ecosyste_lock = threading.Lock()
+
+
+def ecosyste_probe_state() -> dict[str, object]:
+    with _ecosyste_lock:
+        return dict(_ecosyste_probe)
+
+
+def _store_ecosyste_probe(result: dict[str, object]) -> None:
+    with _ecosyste_lock:
+        _ecosyste_probe.clear()
+        _ecosyste_probe.update(result)
+
+
+def _short_probe_error(exc: BaseException) -> str:
+    text = str(exc).strip() or exc.__class__.__name__
+    return " ".join(text.split())[:200]
+
+
+def check_ecosyste(config: Config, transport: HttpGet = http_get) -> dict[str, object]:
+    """Probe ecosyste.ms and store the result for /health.
+
+    A failure is logged and stored. It does not raise and it does not stop serve.
+    """
+    try:
+        result = probe_ecosyste(config, transport)
+    except Exception as exc:
+        log.warning("ecosyste.ms actions probe failed: %s", exc)
+        result = {"ok": False, "checked_at": iso(utcnow()), "error": _short_probe_error(exc)}
+    else:
+        if not result.get("ok"):
+            log.warning("ecosyste.ms actions probe failed: %s", result.get("error"))
+    _store_ecosyste_probe(result)
+    return result
 
 
 def _json(blob: bytes) -> dict:
@@ -1259,6 +1295,8 @@ def actions_watchlist_stale(db: Database, config: Config, now: datetime | None =
 def _refresh_actions_watchlist_safely(db: Database, config: Config, transport: HttpGet, client: GitHubClient) -> None:
     if not actions_watchlist_stale(db, config):
         return
+    # The startup probe already ran. Check again at the start of each refresh.
+    check_ecosyste(config, transport)
     try:
         refresh_actions_watchlist(db, config, transport, client)
     except Exception as exc:
@@ -1410,7 +1448,14 @@ def health_payload(
     if config is not None and getattr(config, "takeover_signals", False):
         payload["takeover_signals"] = db.takeover_counts()
     if config is not None and config.actions:
-        payload["github_actions"] = {**db.action_counts(), "token": bool(config.github_token)}
+        probe = ecosyste_probe_state()
+        payload["github_actions"] = {
+            **db.action_counts(),
+            "token": bool(config.github_token),
+            "ecosyste_ok": bool(probe.get("ok")),
+            "ecosyste_checked_at": probe.get("checked_at"),
+            "ecosyste_error": probe.get("error"),
+        }
     if config is not None and getattr(config, "mcp_registry", False):
         payload["mcp_registry"] = db.mcp_counts()
     if config is not None and getattr(config, "openvsx", False):
@@ -1703,8 +1748,18 @@ def serve(
                     daemon=True,
                 )
             )
+        # Start PyPI and npm before the ecosyste.ms probe so that check cannot
+        # delay those feeds. The probe still runs before the Actions poll threads.
+        started: set[int] = set()
         for thread in polls:
-            thread.start()
+            if thread.name in {"hunter-pypi", "hunter-npm"}:
+                thread.start()
+                started.add(id(thread))
+        if config.actions:
+            check_ecosyste(config, transport)
+        for thread in polls:
+            if id(thread) not in started:
+                thread.start()
         while not stop.is_set():
             _reopen_due_retries(db, config)
             drain_until_idle(db, config, jev=client, loader=release_loader, stop=stop)

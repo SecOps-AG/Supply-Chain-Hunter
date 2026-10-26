@@ -137,11 +137,20 @@ def public_models(models: Any) -> dict[str, dict[str, Any]]:
     return out
 
 
+def _release_segment(value: str) -> str:
+    """One path segment. ``/`` becomes ``~`` so the key contains no ``%2F``.
+
+    ``~`` is outside action names and npm names. Unscoped names have no slash,
+    so they stay byte-for-byte. This encoder is only for release object keys.
+    """
+    return quote(str(value).replace("/", "~"), safe="")
+
+
 def release_object_key(ecosystem: str, name: str, version: str) -> str:
-    eco = quote(ecosystem, safe="")
-    pkg = quote(name, safe="")
-    ver = quote(version, safe="")
-    return f"{LIVE_PREFIX}r/{eco}/{pkg}/{ver}.json"
+    return (
+        f"{LIVE_PREFIX}r/{_release_segment(ecosystem)}/"
+        f"{_release_segment(name)}/{_release_segment(version)}.json"
+    )
 
 
 def _secret_fragments(config: Config) -> list[str]:

@@ -200,10 +200,30 @@ def test_release_object_key_matches_dashboard(db):
     assert release_object_key("npm", "<b>x</b>", "1.0.0") == f"live/r/npm/{quote_name('<b>x</b>')}/1.0.0.json"
 
 
+def test_release_keys_keep_unscoped_names_and_fold_slashes_into_one_segment():
+    assert release_object_key("pypi", "tox", "4.64.10") == "live/r/pypi/tox/4.64.10.json"
+    assert release_object_key("npm", "vite", "8.3.4") == "live/r/npm/vite/8.3.4.json"
+    actions = release_object_key("github-actions", "actions/checkout", "v4@0123456789ab")
+    scoped = release_object_key("npm", "@malloy-publisher/server", "0.9.5")
+    assert actions.split("/") == [
+        "live",
+        "r",
+        "github-actions",
+        "actions~checkout",
+        "v4%400123456789ab.json",
+    ]
+    assert scoped.split("/") == ["live", "r", "npm", "%40malloy-publisher~server", "0.9.5.json"]
+    for key in (actions, scoped):
+        assert "%2F" not in key and "%2f" not in key
+        assert allowed_public_object_key(key)
+    assert not allowed_public_object_key("live/r/github-actions")
+    assert not allowed_public_object_key("../")
+
+
 def quote_name(name: str) -> str:
     from urllib.parse import quote
 
-    return quote(name, safe="")
+    return quote(name.replace("/", "~"), safe="")
 
 
 def _stream_db(tmp_path, now):

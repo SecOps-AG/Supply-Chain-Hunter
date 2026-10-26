@@ -1,6 +1,8 @@
 # GitHub Actions
 
-Hunter can watch popular GitHub Actions the way it watches npm and PyPI packages. It is off by default (`HUNTER_ACTIONS=on` turns it on). Settings are in [configuration.md](configuration.md#github-actions).
+Hunter can watch popular GitHub Actions the way it watches npm and PyPI packages. It is off by default. Set `HUNTER_ACTIONS=on` to turn it on, and leave `HUNTER_ACTIONS_SCOUT` unset so Scout does not read action tags. Settings are in [configuration.md](configuration.md#github-actions).
+
+`HUNTER_ACTIONS_FROM_PACKAGES` defaults to on. That source walks the npm and PyPI watchlists for source repositories and needs `HUNTER_GITHUB_TOKEN`. The first watchlist refresh runs when `serve` starts if no list is stored yet.
 
 ## What a release is
 
@@ -20,6 +22,8 @@ Refreshed weekly (`HUNTER_ACTIONS_WATCHLIST_REFRESH`), up to `HUNTER_ACTIONS_MAX
 3. The actions those actions call from their own `action.yml`, one level down.
 
 `HUNTER_ACTIONS_EXTRA` adds names that are always watched.
+
+Before the action poll threads start, and again at the start of each watchlist refresh, Hunter GETs page 1 of the ecosyste.ms list (`HUNTER_ACTIONS_TOP_URL`) with a short timeout. The body must be a JSON list whose first row yields an `owner/repo`. This check does not follow package-source repositories. Localhost `/health` then includes `github_actions.ecosyste_ok`, `ecosyste_checked_at`, and `ecosyste_error`. A failure is logged, `ecosyste_ok` is false, and `serve` keeps running. Those three fields stay on the operator health payload; they are not copied to the public dashboard.
 
 ## Baseline and polling
 
@@ -60,6 +64,17 @@ Scout (the decision model) does not read moved tags. It reads new tags only when
 A confirmed action appears in the webhook, `feed.json`/`feed.xml` and the dashboards next to npm and PyPI. The feed entry links the tag on GitHub and says which commit to pin to instead. The webhook body has an `action` object with the tag, the old and new commit, and the event kind.
 
 `hunter actions refresh`, `hunter actions poll` and `hunter actions status` run the watchlist refresh, one poll, or a count by hand.
+
+## Turning it on
+
+Operator steps for a host that already runs Hunter. This is documentation only.
+
+1. Put the reviewed revision on the VM. The running revision file is `/opt/hunter/REVISION`.
+2. Edit the root-only env file named by `deploy/hunter.service` (`EnvironmentFile=-/etc/hunter.env`). Set `HUNTER_ACTIONS=on`. Leave `HUNTER_ACTIONS_SCOUT` unset. Set `HUNTER_GITHUB_TOKEN` only if a fine-grained token with no repository access is already available. For the first boot set `HUNTER_ACTIONS_FROM_PACKAGES=off` so the refresh is the ecosyste.ms list only.
+3. Do not change `HUNTER_SCOUT_DAILY_USD_CAP` in the same edit.
+4. Restart `hunter-serve`.
+5. Read loopback `/health`. Expect `github_actions.ecosyste_ok` true, `watched` greater than 0 after refresh, and the first poll's queued count 0.
+6. Deploy the `public_dashboard/` directory, including `functions/live/[[path]].js`, to the existing Pages project. After that, a published Actions release URL returns 200, and a scoped npm release URL returns 200. Unscoped PyPI and npm URLs stay 200.
 
 ## Limits
 

@@ -7,7 +7,12 @@ nothing is downloaded and nothing is run.
 from __future__ import annotations
 
 import json
+import logging
 import sys
+import threading
+import time
+import urllib.error
+import urllib.request
 from datetime import timedelta
 
 import pytest
@@ -33,14 +38,23 @@ from hunter.actions.manifest import parse_action, used_actions
 from hunter.actions.poller import MAX_MOVE_EVENTS, diff_tags, events_for, poll_actions
 from hunter.actions.review import content_signals, review_trees
 from hunter.actions.signals import EventFacts, event_facts, predecessor
-from hunter.actions.watchlist import build_actions_watchlist, github_repo_from_url, load_top_actions
+from hunter.actions.watchlist import build_actions_watchlist, github_repo_from_url, load_top_actions, probe_ecosyste
+from hunter.registry import FeedError
 from hunter.config import Config
 from hunter.db import Database, iso, utcnow
 from hunter.investigate import drain_analyst, drain_investigations
 from hunter.models import ReleaseMeta
 from hunter.public_feed import alert_summary, alert_title, alerts_from_rows, public_alert_from_evidence
 from hunter.rules.scope import file_classes
-from hunter.service import ReleaseLoader, classify_job, health_payload
+from hunter.service import (
+    ReleaseLoader,
+    _refresh_actions_watchlist_safely,
+    check_ecosyste,
+    classify_job,
+    health_payload,
+    serve,
+    start_health,
+)
 from hunter.webhook import drain_outbox
 
 SHA = {key: (key * 40)[:40] for key in "abcdef0123456789"}
@@ -700,13 +714,188 @@ def test_config_reads_the_actions_settings(monkeypatch):
     assert "ghp_example" not in repr(config)
 
 
-def test_health_reports_actions_counts_when_on(tmp_path):
+def _top_body() -> bytes:
+    return json.dumps(
+        [{"name": "actions/checkout", "repository_url": "https://github.com/actions/checkout", "dependent_repos_count": 9}]
+    ).encode()
+
+
+def _raise_oserror(url, timeout):
+    raise OSError("x" * 500)
+
+
+def _raise_feed(url, timeout):
+    raise FeedError("connection refused")
+
+
+def test_ecosyste_probe_accepts_a_json_list_whose_first_row_is_a_repo():
+    config = Config(actions_top_url="https://top.example/list")
+    calls = []
+
+    def transport(url, timeout):
+        calls.append(url)
+        assert timeout == 10
+        assert url.startswith("https://top.example/list?")
+        assert "page=1" in url
+        assert "npm" not in url and "pypi.org" not in url
+        return _top_body()
+
+    result = probe_ecosyste(config, transport)
+    assert calls == [calls[0]]
+    assert result["ok"] is True
+    assert result["error"] is None
+    assert str(result["checked_at"]).endswith("Z")
+
+
+def test_ecosyste_probe_reports_non_json_and_connection_failure():
+    config = Config(actions_top_url="https://top.example/list")
+    bad = probe_ecosyste(config, lambda url, timeout: b"<html>nope</html>")
+    assert bad["ok"] is False
+    assert bad["error"] == "actions top list is not JSON"
+    assert str(bad["checked_at"]).endswith("Z")
+
+    down = probe_ecosyste(config, _raise_oserror)
+    assert down["ok"] is False
+    assert down["error"] is not None
+    assert len(str(down["error"])) <= 200
+    assert str(down["error"]).startswith("x")
+
+    refused = probe_ecosyste(config, _raise_feed)
+    assert refused["ok"] is False
+    assert refused["error"] == "connection refused"
+
+    empty = probe_ecosyste(config, lambda url, timeout: b"[]")
+    assert empty["ok"] is False
+    assert empty["error"] == "actions top list has no owner/repo"
+    # A later good row does not count. The first row has to be owner/repo.
+    later = probe_ecosyste(
+        config,
+        lambda url, timeout: json.dumps([{"name": "not-a-repo"}, {"name": "actions/checkout"}]).encode(),
+    )
+    assert later["ok"] is False
+
+
+def test_health_reports_actions_counts_when_on(tmp_path, caplog):
     db = Database(tmp_path / "hunter.sqlite3")
     _watch(db, "o/t")
-    payload = health_payload(db, 0.0, config=_config(tmp_path))
-    assert payload["github_actions"]["watched"] == 1
-    assert payload["github_actions"]["token"] is False
+    config = _config(tmp_path, actions_top_url="https://top.example/list")
+    with caplog.at_level(logging.WARNING):
+        stored = check_ecosyste(config, lambda url, timeout: _top_body())
+    assert stored["ok"] is True
+    payload = health_payload(db, 0.0, config=config)
+    block = payload["github_actions"]
+    assert block["watched"] == 1
+    assert block["token"] is False
+    assert block["ecosyste_ok"] is True
+    assert block["ecosyste_checked_at"] == stored["checked_at"]
+    assert block["ecosyste_error"] is None
     assert "github_actions" not in health_payload(db, 0.0, config=Config(db_path=db.path))
+
+    with caplog.at_level(logging.WARNING):
+        failed = check_ecosyste(config, lambda url, timeout: b"not-json")
+    assert failed["ok"] is False
+    again = health_payload(db, 0.0, config=config)["github_actions"]
+    assert again["ecosyste_ok"] is False
+    assert again["ecosyste_checked_at"]
+    assert again["ecosyste_error"]
+    assert "ecosyste.ms actions probe failed" in caplog.text
+
+
+def test_watchlist_refresh_probes_ecosyste_before_rebuilding(tmp_path):
+    db = Database(tmp_path / "hunter.sqlite3")
+    config = _config(tmp_path, actions_top_url="https://top.example/list", actions_from_packages=False)
+    calls = []
+
+    def transport(url, timeout):
+        calls.append(url)
+        assert "npm" not in url and "pypi" not in url
+        page = int(url.rsplit("page=", 1)[1])
+        if page == 1:
+            return _top_body()
+        return b"[]"
+
+    _refresh_actions_watchlist_safely(db, config, transport, FakeGitHub())
+    assert calls and "page=1" in calls[0]
+    assert health_payload(db, 0.0, config=config)["github_actions"]["ecosyste_ok"] is True
+    seen = len(calls)
+    _refresh_actions_watchlist_safely(db, config, transport, FakeGitHub())
+    assert len(calls) == seen
+
+
+def test_serve_answers_health_when_the_ecosyste_probe_fails(tmp_path, monkeypatch):
+    # serve() attaches the process-wide daily log handler. Put the previous
+    # handlers back so later tests still get a log file in their own directory.
+    root = logging.getLogger()
+    previous = list(root.handlers)
+    previous_level = root.level
+    ready = threading.Event()
+    pypi_polled = threading.Event()
+    found = {}
+
+    def spy(config, db, started, meter=None):
+        server = start_health(config, db, started, meter)
+        found["port"] = server.server_address[1]
+        ready.set()
+        return server
+
+    monkeypatch.setattr("hunter.service.start_health", spy)
+
+    class Feed:
+        def last_serial(self):
+            pypi_polled.set()
+            return 1
+
+        def since(self, _serial):
+            return []
+
+    def transport(url, timeout):
+        raise OSError("connection refused")
+
+    stop = threading.Event()
+    body = {}
+
+    def watcher():
+        try:
+            if not ready.wait(5):
+                return
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                try:
+                    with urllib.request.urlopen(f"http://127.0.0.1:{found['port']}/health", timeout=1) as response:
+                        payload = json.load(response)
+                except (OSError, urllib.error.URLError, json.JSONDecodeError, TimeoutError):
+                    time.sleep(0.05)
+                    continue
+                if payload.get("github_actions", {}).get("ecosyste_error"):
+                    body.update(payload)
+                    break
+                time.sleep(0.05)
+            pypi_polled.wait(5)
+        finally:
+            stop.set()
+
+    threading.Thread(target=watcher, daemon=True).start()
+    try:
+        serve(
+            _config(tmp_path, bind="127.0.0.1", port=0, skip_npm=True, actions_top_url="https://top.example/list"),
+            stop=stop,
+            jev=object(),
+            feed=Feed(),
+            transport=transport,
+        )
+    finally:
+        for handler in list(root.handlers):
+            if handler not in previous:
+                handler.close()
+                root.removeHandler(handler)
+        root.handlers.clear()
+        for handler in previous:
+            root.addHandler(handler)
+        root.setLevel(previous_level)
+    assert body["status"] == "ok"
+    assert body["github_actions"]["ecosyste_ok"] is False
+    assert "connection refused" in body["github_actions"]["ecosyste_error"]
+    assert pypi_polled.is_set()
 
 
 def test_actions_scout_has_its_own_daily_limit(tmp_path):

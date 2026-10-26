@@ -10,9 +10,11 @@ from datetime import datetime, timezone
 from hunter.config import Config
 from hunter.db import Database
 from hunter.investigate import drain_analyst, drain_investigations
+from hunter.public_dash import release_object_key
 from hunter.public_feed import (
     FEED_DESCRIPTION,
     JSON_FEED_VERSION,
+    allowed_public_object_key,
     make_r2_client,
     public_registry_url,
     publish_public_feed,
@@ -373,6 +375,22 @@ def test_idle_drain_asks_the_publisher_once(tmp_path, monkeypatch):
     db = Database(tmp_path / "hunter.sqlite3")
     drain_until_idle(db, Config(), jev=None, loader=None)
     assert calls == [1]
+
+
+def test_actions_release_key_is_allowlisted_without_an_encoded_slash():
+    assert release_object_key("pypi", "tox", "4.64.10") == "live/r/pypi/tox/4.64.10.json"
+    assert release_object_key("npm", "vite", "8.3.4") == "live/r/npm/vite/8.3.4.json"
+    actions = release_object_key("github-actions", "actions/checkout", "v4@0123456789ab")
+    scoped = release_object_key("npm", "@malloy-publisher/server", "0.9.5")
+    assert actions.count("/") == 4
+    assert "~" in actions and "%40" in actions
+    assert "%2F" not in actions and "%2f" not in actions
+    assert "%2F" not in scoped and "%2f" not in scoped
+    assert scoped.split("/")[3] == "%40malloy-publisher~server"
+    assert allowed_public_object_key(actions)
+    assert allowed_public_object_key(scoped)
+    assert not allowed_public_object_key("live/r/github-actions")
+    assert not allowed_public_object_key("../")
 
 
 def test_health_reports_an_unpublished_feed(tmp_path):
