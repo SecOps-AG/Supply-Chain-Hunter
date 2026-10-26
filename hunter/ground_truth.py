@@ -7,6 +7,8 @@ packument documents. No package archive is downloaded and nothing is run.
 The report gives recall (caught / malicious releases Hunter scored) and
 time-to-detect (Hunter's flag time minus the first public malicious signal).
 A negative time-to-detect means Hunter flagged the release first.
+Open VSX registry labels are listed apart from that recall. A removal is not a
+malware verdict, and no extension archive is fetched for one.
 """
 
 from __future__ import annotations
@@ -45,6 +47,7 @@ TAKEDOWN_CACHE = "npm-takedowns.json"
 GIT_SPARSE_PATHS = ("osv/malicious/npm", "osv/malicious/pypi")
 GIT_TIMEOUT = 1800.0
 CAUGHT_BANDS = {"review", "alert"}
+_OPENVSX_NOT_REVIEWED = {"vsx_removed_before_review", "vsx_inactive_before_review"}
 
 HttpPost = Callable[[str, bytes, float], bytes]
 GitRunner = Callable[[list[str], Path | None], None]
@@ -479,6 +482,104 @@ def _aware(text: str | None) -> datetime | None:
     return stamp
 
 
+def _payload_signals(row: dict) -> list[str]:
+    raw = row.get("payload_json")
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(data, dict):
+        return []
+    signals = data.get("signals")
+    if not isinstance(signals, list):
+        return []
+    return [str(item) for item in signals]
+
+
+def _label_views(rows: list[dict]) -> list[dict]:
+    views = [
+        {"platform": row.get("platform"), "state": row.get("state"), "changed_at": row.get("changed_at")}
+        for row in rows
+    ]
+    views.sort(key=lambda item: (str(item["platform"]), str(item["state"]), str(item["changed_at"])))
+    return views
+
+
+def _openvsx_registry(rows: list[dict], labels: list[dict]) -> tuple[list[dict], dict]:
+    """Scored Open VSX releases joined with registry labels. Labels alone are not misses."""
+    grouped: dict[tuple[str, str], list[dict]] = {}
+    for label in labels:
+        grouped.setdefault((str(label.get("name")), str(label.get("version"))), []).append(label)
+    seen: set[tuple[str, str]] = set()
+    items: list[dict] = []
+    scored = caught = not_reviewed = 0
+    for row in rows:
+        key = (str(row.get("name")), str(row.get("version")))
+        seen.add(key)
+        unread = bool(set(_payload_signals(row)) & _OPENVSX_NOT_REVIEWED)
+        band = row.get("band")
+        is_caught = (not unread) and band in CAUGHT_BANDS
+        scored += 1
+        if unread:
+            not_reviewed += 1
+        elif is_caught:
+            caught += 1
+        scored_at = _aware(row.get("created_at"))
+        items.append(
+            {
+                "name": row.get("name"),
+                "version": str(row.get("version")),
+                "band": band,
+                "scored_at": iso(scored_at) if scored_at else None,
+                "caught": is_caught,
+                "not_reviewed": unread,
+                "labels": _label_views(grouped.get(key, [])),
+            }
+        )
+    for key, group in grouped.items():
+        if key in seen:
+            continue
+        items.append(
+            {
+                "name": key[0],
+                "version": key[1],
+                "band": None,
+                "scored_at": None,
+                "caught": False,
+                "not_reviewed": False,
+                "labels": _label_views(group),
+            }
+        )
+    items.sort(key=lambda item: (str(item["name"]), str(item["version"])))
+    summary = {
+        "removed": sum(1 for label in labels if label.get("state") == "removed"),
+        "inactive": sum(1 for label in labels if label.get("state") == "inactive"),
+        "scored": scored,
+        "caught": caught,
+        "not_reviewed": not_reviewed,
+    }
+    return items, summary
+
+
+def _labels_since(labels: list[dict], since: str) -> list[dict]:
+    """Labels whose truth time (``changed_at``, else ``first_seen_at``) is inside the window."""
+    if not since:
+        return list(labels)
+    start = _aware(since)
+    if start is None:
+        return list(labels)
+    kept = []
+    for label in labels:
+        raw = label.get("changed_at") or label.get("first_seen_at")
+        when = _aware(str(raw)) if raw else None
+        if when is not None and when < start:
+            continue
+        kept.append(label)
+    return kept
+
+
 def build_report(
     releases: list[dict],
     records: list[MalRecord],
@@ -486,13 +587,20 @@ def build_report(
     *,
     now: datetime | None = None,
     meta: dict | None = None,
+    openvsx_labels: list[dict] | None = None,
 ) -> dict:
     """Label each scored release against the ground truth and compute the metrics.
 
     `releases` rows need ecosystem, name, version, band, created_at and confirmed_at.
     A release counts as caught when Scout put it in review or alert, or an alert was
     confirmed. Releases still `deferred` are left out of recall and counted apart.
+    Open VSX rows are not part of that recall. ``openvsx_labels`` joins them in
+    ``openvsx_items``. ``vsx_removed_before_review`` and ``vsx_inactive_before_review``
+    count as ``not_reviewed``.
     """
+    label_rows = list(openvsx_labels or [])
+    openvsx_releases = [row for row in releases if row.get("ecosystem") == "openvsx"]
+    releases = [row for row in releases if row.get("ecosystem") != "openvsx"]
     by_package: dict[tuple[str, str], list[MalRecord]] = {}
     for record in records:
         for key in record.affected:
@@ -572,11 +680,14 @@ def build_report(
         "osv_records": len(records),
         "npm_takedowns": len(takedowns),
     }
+    openvsx_items, openvsx_summary = _openvsx_registry(openvsx_releases, label_rows)
+    summary["openvsx_registry"] = openvsx_summary
     return {
         "generated_at": iso(now or utcnow()),
         **(meta or {}),
         "summary": summary,
         "items": items,
+        "openvsx_items": openvsx_items,
     }
 
 
@@ -646,7 +757,8 @@ def run_ground_truth(
     data_dir = ground_truth_dir(config)
     source = source or make_source(config, transport=transport)
     releases = db.ground_truth_releases(since)
-    packages = {(row["ecosystem"], row["name"]) for row in releases}
+    # Registry labels are not OSV packages, and their archives are not fetched.
+    packages = {(row["ecosystem"], row["name"]) for row in releases if row["ecosystem"] != "openvsx"}
     errors: list[str] = []
     try:
         records = source.records(packages, fetch=fetch)
@@ -692,6 +804,7 @@ def run_ground_truth(
             "npm_checked": checked,
             "errors": errors,
         },
+        openvsx_labels=_labels_since(db.openvsx_labels(), since),
     )
     target = Path(out) if out else data_dir / REPORT_NAME
     _write_json(target, report)

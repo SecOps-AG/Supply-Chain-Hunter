@@ -287,6 +287,15 @@ class Database:
                 PRIMARY KEY (name, version, platform)
             );
             CREATE INDEX IF NOT EXISTS openvsx_changes_state ON openvsx_changes (state, last_seen_at);
+            CREATE TABLE IF NOT EXISTS openvsx_labels (
+                name TEXT NOT NULL,
+                version TEXT NOT NULL,
+                platform TEXT NOT NULL,
+                state TEXT NOT NULL,
+                changed_at TEXT,
+                first_seen_at TEXT NOT NULL,
+                PRIMARY KEY (name, version, platform)
+            );
             CREATE TABLE IF NOT EXISTS takeover_signals (
                 ecosystem TEXT NOT NULL,
                 name TEXT NOT NULL,
@@ -395,6 +404,15 @@ class Database:
                 (ecosystem, name, version),
             ).fetchone()
         return row is not None
+
+    def delete_release(self, ecosystem: str, name: str, version: str) -> None:
+        """Drop a stored classification so a republished Open VSX version is reviewed again."""
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM releases WHERE ecosystem = ? AND name = ? AND version = ?",
+                (ecosystem, name, version),
+            )
+            self._conn.commit()
 
     def get_release(self, ecosystem: str, name: str, version: str) -> sqlite3.Row | None:
         with self._lock:
@@ -732,18 +750,56 @@ class Database:
             ).fetchone()
         return {"scored": int(row["scored"] or 0), "flagged": int(row["flagged"] or 0)}
 
-    def reopen_job(self, ecosystem: str, name: str, version: str, rank: int | None = None) -> None:
+    def reopen_job(
+        self,
+        ecosystem: str,
+        name: str,
+        version: str,
+        rank: int | None = None,
+        max_pending: int | None = None,
+    ) -> str:
+        """Pending stays pending. Done returns to pending. A missing row is inserted.
+
+        Returns ``pending``, ``reopened``, ``inserted``, or ``refused``.
+        ``max_pending`` refuses a new pending row when the queue is already full.
+        An already-pending job is not refused.
+        """
         moment = iso(utcnow())
         with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT status FROM release_jobs
+                WHERE ecosystem = ? AND name = ? AND version = ?
+                """,
+                (ecosystem, name, version),
+            ).fetchone()
+            if row is not None and str(row["status"]) == "pending":
+                return "pending"
+            if max_pending is not None:
+                count = self._conn.execute(
+                    "SELECT COUNT(*) AS n FROM release_jobs WHERE status = 'pending'"
+                ).fetchone()
+                if int(count["n"]) >= max_pending:
+                    return "refused"
+            if row is None:
+                self._conn.execute(
+                    """
+                    INSERT INTO release_jobs (ecosystem, name, version, rank, status, created_at)
+                    VALUES (?, ?, ?, ?, 'pending', ?)
+                    """,
+                    (ecosystem, name, version, rank, moment),
+                )
+                self._conn.commit()
+                return "inserted"
             self._conn.execute(
                 """
-                INSERT INTO release_jobs (ecosystem, name, version, rank, status, created_at)
-                VALUES (?, ?, ?, ?, 'pending', ?)
-                ON CONFLICT(ecosystem, name, version) DO UPDATE SET status = 'pending'
+                UPDATE release_jobs SET status = 'pending'
+                WHERE ecosystem = ? AND name = ? AND version = ?
                 """,
-                (ecosystem, name, version, rank, moment),
+                (ecosystem, name, version),
             )
             self._conn.commit()
+        return "reopened"
 
     def finish_job(self, ecosystem: str, name: str, version: str) -> None:
         with self._lock:
@@ -1615,16 +1671,16 @@ class Database:
         return [dict(row) for row in rows]
 
     def ground_truth_releases(self, since: str) -> list[dict]:
-        """npm and PyPI releases scored at or after `since`, with the confirmed public-alert time if any."""
+        """npm, PyPI, and Open VSX releases scored at or after `since`, with the confirmed public-alert time if any."""
         with self._lock:
             rows = self._conn.execute(
                 """
-                SELECT r.ecosystem, r.name, r.version, r.band, r.created_at,
+                SELECT r.ecosystem, r.name, r.version, r.band, r.payload_json, r.created_at,
                        p.first_seen_at AS confirmed_at
                 FROM releases r
                 LEFT JOIN public_feed_items p
                   ON p.ecosystem = r.ecosystem AND p.name = r.name AND p.version = r.version
-                WHERE r.ecosystem IN ('npm', 'pypi') AND r.created_at >= ?
+                WHERE r.ecosystem IN ('npm', 'pypi', 'openvsx') AND r.created_at >= ?
                 """,
                 (since,),
             ).fetchall()
@@ -2150,3 +2206,37 @@ class Database:
         found = {str(row["state"]).lower(): int(row["n"]) for row in rows}
         other = sum(count for state, count in found.items() if state not in {"active", "removed"})
         return {"active": found.get("active", 0), "removed": found.get("removed", 0), "other": other}
+
+    def record_openvsx_label(
+        self,
+        name: str,
+        version: str,
+        platform: str,
+        state: str,
+        changed_at: str | None,
+        when: datetime | None = None,
+    ) -> None:
+        """Insert one removal or unpublish label. A second write for the same platform does nothing."""
+        moment = iso(when or utcnow())
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO openvsx_labels (name, version, platform, state, changed_at, first_seen_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(name, version, platform) DO NOTHING
+                """,
+                (name, version, platform, state, changed_at, moment),
+            )
+            self._conn.commit()
+
+    def openvsx_labels(self) -> list[dict]:
+        """Append-only removal and unpublish labels. A later ACTIVE does not delete them."""
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT name, version, platform, state, changed_at, first_seen_at
+                FROM openvsx_labels
+                ORDER BY name, version, platform
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
