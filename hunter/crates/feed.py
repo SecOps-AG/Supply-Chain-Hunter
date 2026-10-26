@@ -294,6 +294,24 @@ def _fetch_index(config, name: str, transport: HttpGet) -> list[dict]:
     return index_lines(_read_body(transport(url, 60)))
 
 
+def _newest_index_version(config, name: str, transport: HttpGet) -> str:
+    """Last index ``vers`` for a crates.xml item whose title has no version.
+
+    The live new-crate title is ``New crate created: {name}``. The sparse index
+    is the version. A missing index is logged and the name is skipped.
+    """
+    try:
+        lines = _fetch_index(config, name, transport)
+    except (FeedError, OSError, ValueError, UnicodeError) as exc:
+        log.warning("crates index read failed for %s: %s", name, exc)
+        return ""
+    for line in reversed(lines):
+        version = str(line.get("vers") or "")
+        if safe_segment(version):
+            return version
+    return ""
+
+
 def _backfill(
     db: Database,
     config,
@@ -406,10 +424,19 @@ def poll_crates(
             log.warning("crates gap backfill paused")
             return queued
     blocked = False
+    versioned = {item.name for item in ordered if item.version}
     for item in ordered:
         if item.published <= checkpoint:
             continue
-        state, typo_left = _store_version(db, config, item.name, item.version, watch, typo_left)
+        version = item.version
+        if not version:
+            if item.name in versioned:
+                continue
+            version = _newest_index_version(config, item.name, transport)
+            if not version:
+                log.warning("crates new name %s had no index version", item.name)
+                continue
+        state, typo_left = _store_version(db, config, item.name, version, watch, typo_left)
         if state == "queued":
             queued += 1
         elif state == "refused":

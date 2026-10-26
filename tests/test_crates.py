@@ -170,6 +170,14 @@ def test_rss_name_and_version_come_from_the_link_or_the_title():
     assert [(item.name, item.version) for item in parse_rss(names)] == [("fresh-crate", "1.2.3")]
     assert parse_release_link("https://crates.io/crates/../1.0.0", "evil v1.0.0") is None
     assert parse_release_link("https://crates.io/crates/foo/../1.0.0") is None
+    # Live crates.xml titles are "New crate created: {name}". A name that starts
+    # with v is not a version.
+    assert parse_release_link("https://crates.io/crates/veylog", "New crate created: veylog") == ("veylog", "")
+    assert parse_release_link("https://crates.io/crates/v2", "New crate created: v2") == ("v2", "")
+    assert parse_release_link(
+        "https://crates.io/crates/dml-core",
+        "New crate version published: dml-core v0.19.0",
+    ) == ("dml-core", "0.19.0")
 
 
 def test_download_url_fills_cargo_placeholders_and_appends_the_download_path():
@@ -298,6 +306,23 @@ def test_typosquat_pairs_rustdecimal_and_faster_log_but_not_evm_units(tmp_path):
     db.set_checkpoint("crates", _stamp(1))
     assert poll_crates(db, config, web) == 2
     assert _jobs(db) == {("rustdecimal", "0.1.0"): 1, ("faster_log", "0.1.0"): 2}
+
+
+def test_created_title_takes_its_version_from_the_index(tmp_path):
+    db = _db(tmp_path)
+    _seed(db, ["serde"])
+    db.set_checkpoint("crates", _stamp(1))
+    index = _index(_line("0.1.0", "ab" * 32, published=_stamp(2)))
+    web = _Web(
+        {
+            UPDATES: _rss(("serde v1.0.0", "https://crates.io/crates/serde/1.0.0", _pub(1))),
+            NAMES: _rss(("New crate created: veylog", "https://crates.io/crates/veylog", _pub(2))),
+            INDEX + "/ve/yl/veylog": index,
+        }
+    )
+    assert poll_crates(db, _config(tmp_path), web) == 1
+    assert _jobs(db) == {("veylog", "0.1.0"): None}
+    assert ("veylog", "eylog") not in _jobs(db)
 
 
 def test_full_feed_queues_evm_units(tmp_path):

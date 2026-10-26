@@ -51,19 +51,31 @@ def sparse_path(name: str) -> str:
     return f"{sparse_prefix(text)}/{text}"
 
 
-def _title_version(title: str) -> str:
-    """Version from a title such as ``tree-sitter-cpp v0.22.0``."""
+def _title_version(title: str, name: str) -> str:
+    """Version from a title such as ``tree-sitter-cpp v0.22.0``.
+
+    The token after `` v`` has to start with a digit, and the text before it has
+    to name this crate. ``New crate created: veylog`` is a name, not version
+    ``eylog``, and ``New crate created: v2`` is not version ``2``.
+    """
     if " v" not in (title or ""):
         return ""
-    version = title.rsplit(" v", 1)[1].strip().split()[0] if title.rsplit(" v", 1)[1].strip() else ""
-    return version
+    left, right = title.rsplit(" v", 1)
+    token = right.strip().split()[0] if right.strip() else ""
+    if not token or not token[0].isdigit() or not safe_segment(token):
+        return ""
+    stem = left.strip().split(":")[-1].strip().lower()
+    if stem != (name or "").lower():
+        return ""
+    return token
 
 
 def parse_release_link(link: str, title: str = "") -> tuple[str, str] | None:
     """Name and version from ``https://crates.io/crates/{name}/{version}``.
 
     A crates-feed item whose link has no version uses the title, split on `` v``.
-    Unsafe names and versions are refused.
+    A title with no version returns the name and an empty version. Unsafe names
+    and versions are refused.
     """
     path = urlparse((link or "").strip()).path.strip("/")
     parts = [part for part in path.split("/") if part]
@@ -72,8 +84,12 @@ def parse_release_link(link: str, title: str = "") -> tuple[str, str] | None:
     if not parts:
         return None
     name = parts[0].lower()
-    version = parts[1] if len(parts) >= 2 else _title_version(title)
-    if not safe_segment(name) or not safe_segment(version):
+    version = parts[1] if len(parts) >= 2 else _title_version(title, name)
+    if not safe_segment(name):
+        return None
+    if not version:
+        return name, ""
+    if not safe_segment(version):
         return None
     return name, version
 
