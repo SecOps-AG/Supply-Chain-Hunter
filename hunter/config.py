@@ -345,6 +345,13 @@ class Config:
     mcp_registry: bool = False
     mcp_registry_url: str = MCP_REGISTRY_URL
     mcp_poll_interval: float = 3600.0
+    # MCP tool-description and server.json signals before Scout (HUNTER_MCP_RISK).
+    # Off by default. On, the classify queue adds this score to the takeover score.
+    # The signals do not change a band, set a rule floor, or enter a model prompt.
+    mcp_risk: bool = False
+    mcp_risk_batch: int = 8
+    mcp_secret_min: int = 5
+    mcp_env_min: int = 8
     # Open VSX extensions through the registry changes feed (HUNTER_OPENVSX). Off by default.
     # Rules read every release. A new extensionPack or extensionDependencies id routes on its own.
     # With HUNTER_OPENVSX_SCOUT on, Scout reads a malicious verdict or a hit with a manifest change.
@@ -545,6 +552,10 @@ class Config:
             mcp_registry=_flag("HUNTER_MCP_REGISTRY"),
             mcp_registry_url=os.environ.get("HUNTER_MCP_REGISTRY_URL", "").strip().rstrip("/") or MCP_REGISTRY_URL,
             mcp_poll_interval=max(300.0, float(os.environ.get("HUNTER_MCP_POLL_INTERVAL", "3600"))),
+            mcp_risk=_flag("HUNTER_MCP_RISK"),
+            mcp_risk_batch=max(1, int(os.environ.get("HUNTER_MCP_RISK_BATCH", "8"))),
+            mcp_secret_min=max(0, int(os.environ.get("HUNTER_MCP_SECRET_MIN", "5"))),
+            mcp_env_min=max(0, int(os.environ.get("HUNTER_MCP_ENV_MIN", "8"))),
             openvsx=_flag("HUNTER_OPENVSX"),
             openvsx_url=os.environ.get("HUNTER_OPENVSX_URL", "").strip().rstrip("/") or OPENVSX_URL,
             openvsx_poll_interval=max(60.0, float(os.environ.get("HUNTER_OPENVSX_POLL_INTERVAL", "300"))),

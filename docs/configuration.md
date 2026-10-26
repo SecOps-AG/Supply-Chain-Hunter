@@ -245,6 +245,19 @@ Off by default. With `HUNTER_TAKEOVER_SIGNALS=on`, Hunter reads registry metadat
 
 Signals are stored per release in the `takeover_signals` table. Localhost `/health` adds a `takeover_signals` block with how many releases were scored and how many had at least one signal.
 
+## MCP tool and server.json signals
+
+Off by default. With `HUNTER_MCP_RISK=on`, Hunter scores pending npm and PyPI releases that are already on the MCP watchlist, before Scout. It reads the new archive and the previous one as text, and the registry server document for that package. The score only changes classify queue order: takeover score plus this score, highest first, then oldest. It does not change a band, set a rule floor, or get copied into a Scout, Triage, or Analyst prompt. A tool description is stored only as a signal id, the tool name, and a short escaped excerpt in SQLite. How the signals work: [detection.md](detection.md#mcp-tool-and-serverjson-signals).
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `HUNTER_MCP_RISK` | off | `on` records the signals and adds their score to the classify queue order. |
+| `HUNTER_MCP_RISK_BATCH` | `8` | Most MCP-watchlist releases scored per classify round. |
+| `HUNTER_MCP_SECRET_MIN` | `5` | Required secrets before `many_required_secrets`. `0` turns that check off. |
+| `HUNTER_MCP_ENV_MIN` | `8` | Required environment inputs before `many_required_env`. `0` turns that check off. |
+
+Account-takeover scoring still follows its own flag. A cleartext `http://` URL or a missing repository raises the score. Both are common on remote-only servers and are not a verdict. Localhost `/health` adds an `mcp_risk` block with how many releases were scored and how many had a score above zero, only when the flag is on.
+
 ## Performance and storage
 
 | Variable | Default | What it does |

@@ -308,6 +308,19 @@ class Database:
                 created_at TEXT NOT NULL,
                 PRIMARY KEY (ecosystem, name, version)
             );
+            CREATE TABLE IF NOT EXISTS mcp_risk (
+                ecosystem TEXT NOT NULL,
+                name TEXT NOT NULL,
+                version TEXT NOT NULL,
+                old_version TEXT,
+                server TEXT,
+                score INTEGER NOT NULL,
+                signals_json TEXT NOT NULL,
+                detail_json TEXT NOT NULL,
+                error TEXT,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (ecosystem, name, version)
+            );
             """
         )
         self._conn.commit()
@@ -616,8 +629,36 @@ class Database:
                 return False
         return True
 
-    def pending_jobs(self, limit: int = 100, *, prioritize: bool = False) -> list[sqlite3.Row]:
-        """Oldest first. `prioritize` puts a higher account-takeover score first."""
+    def pending_jobs(
+        self,
+        limit: int = 100,
+        *,
+        prioritize: bool = False,
+        prioritize_mcp: bool = False,
+    ) -> list[sqlite3.Row]:
+        """Oldest first.
+
+        `prioritize` puts a higher account-takeover score first.
+        `prioritize_mcp` orders by the takeover score plus the MCP risk score.
+        When `prioritize_mcp` is false, the SQL is unchanged.
+        """
+        if prioritize_mcp:
+            with self._lock:
+                rows = self._conn.execute(
+                    """
+                    SELECT j.ecosystem, j.name, j.version, j.rank FROM release_jobs AS j
+                    LEFT JOIN takeover_signals AS t
+                        ON t.ecosystem = j.ecosystem AND t.name = j.name AND t.version = j.version
+                    LEFT JOIN mcp_risk AS m
+                        ON m.ecosystem = j.ecosystem AND m.name = j.name AND m.version = j.version
+                    WHERE j.status = 'pending'
+                    ORDER BY (COALESCE(t.score, 0) + COALESCE(m.score, 0)) DESC,
+                        j.created_at, j.ecosystem, j.name, j.version
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+            return list(rows)
         if not prioritize:
             with self._lock:
                 rows = self._conn.execute(
@@ -2131,6 +2172,98 @@ class Database:
             ).fetchall()
         found = {str(row["ecosystem"]): int(row["n"]) for row in rows}
         return {"npm": found.get("npm", 0), "pypi": found.get("pypi", 0)}
+
+    def save_mcp_risk(
+        self,
+        ecosystem: str,
+        name: str,
+        version: str,
+        score: int,
+        signals: list[str],
+        detail: dict,
+        *,
+        server: str = "",
+        old_version: str | None = None,
+        error: str = "",
+        when: datetime | None = None,
+    ) -> None:
+        moment = iso(when or utcnow())
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO mcp_risk (
+                    ecosystem, name, version, old_version, server, score,
+                    signals_json, detail_json, error, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(ecosystem, name, version) DO UPDATE SET
+                    old_version = excluded.old_version,
+                    server = excluded.server,
+                    score = excluded.score,
+                    signals_json = excluded.signals_json,
+                    detail_json = excluded.detail_json,
+                    error = excluded.error,
+                    created_at = excluded.created_at
+                """,
+                (
+                    ecosystem,
+                    name,
+                    version,
+                    old_version,
+                    server or None,
+                    int(score),
+                    json.dumps(list(signals)),
+                    json.dumps(detail, sort_keys=True, default=str),
+                    error or None,
+                    moment,
+                ),
+            )
+            self._conn.commit()
+
+    def mcp_risk(self, ecosystem: str, name: str, version: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM mcp_risk WHERE ecosystem = ? AND name = ? AND version = ?",
+                (ecosystem, name, version),
+            ).fetchone()
+        if row is None:
+            return None
+        found = dict(row)
+        found["signals"] = json.loads(found.pop("signals_json") or "[]")
+        found["detail"] = json.loads(found.pop("detail_json") or "{}")
+        return found
+
+    def mcp_risk_counts(self) -> dict:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT COUNT(*) AS scored, SUM(CASE WHEN score > 0 THEN 1 ELSE 0 END) AS flagged
+                FROM mcp_risk
+                """
+            ).fetchone()
+        return {"scored": int(row["scored"] or 0), "flagged": int(row["flagged"] or 0)}
+
+    def unscored_mcp_jobs(self, limit: int = 8) -> list[sqlite3.Row]:
+        """Pending npm and PyPI jobs on the MCP watchlist with no mcp_risk row yet."""
+        if limit <= 0:
+            return []
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT j.ecosystem, j.name, j.version, j.rank, m.server
+                FROM release_jobs AS j
+                JOIN mcp_packages AS m
+                    ON m.ecosystem = j.ecosystem AND m.name = j.name
+                LEFT JOIN mcp_risk AS r
+                    ON r.ecosystem = j.ecosystem AND r.name = j.name AND r.version = j.version
+                WHERE j.status = 'pending'
+                  AND r.name IS NULL
+                  AND j.ecosystem IN ('npm', 'pypi')
+                ORDER BY j.created_at, j.ecosystem, j.name, j.version
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return list(rows)
 
     def poll_watch(self, ecosystem: str) -> dict[str, int | None]:
         """Names the npm or PyPI poll queues releases for: the ranked watchlist plus MCP packages.
