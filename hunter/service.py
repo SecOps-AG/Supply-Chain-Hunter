@@ -88,6 +88,7 @@ from hunter.registry import (
     refresh_watchlists,
     versions_after,
 )
+from hunter.mcp_risk import score_pending_jobs as score_mcp_jobs
 from hunter.takeover import score_pending_jobs
 from hunter.typosquat import TYPOSQUAT_QUEUE_LIMIT, NameIndex, typosquat_pairs
 from hunter.registry import parse_time
@@ -907,7 +908,11 @@ def drain_jobs(
     limit: int | None = None,
 ) -> int:
     batch = config.classify_batch if limit is None else limit
-    jobs = db.pending_jobs(limit=max(0, batch), prioritize=getattr(config, "takeover_signals", False))
+    jobs = db.pending_jobs(
+        limit=max(0, batch),
+        prioritize=getattr(config, "takeover_signals", False),
+        prioritize_mcp=getattr(config, "mcp_risk", False),
+    )
     if not jobs:
         return 0
     if stop is not None and stop.is_set():
@@ -955,6 +960,14 @@ def _score_takeover_safely(db: Database, config: Config, transport: HttpGet) -> 
         log.exception("takeover signal pass failed")
 
 
+def _score_mcp_safely(db: Database, config: Config, loader: ReleaseLoader) -> None:
+    """MCP tool and server.json signals. A failure never blocks classify."""
+    try:
+        score_mcp_jobs(db, config, loader)
+    except Exception:
+        log.exception("mcp risk pass failed")
+
+
 def drain_until_idle(
     db: Database,
     config: Config,
@@ -978,6 +991,8 @@ def drain_until_idle(
         n_jobs = 0
         if room > 0 and getattr(config, "takeover_signals", False):
             _score_takeover_safely(db, config, getattr(loader, "transport", http_get))
+        if room > 0 and getattr(config, "mcp_risk", False):
+            _score_mcp_safely(db, config, loader)
         if room > 0:
             n_jobs = drain_jobs(
                 db,
@@ -1447,6 +1462,8 @@ def health_payload(
     payload["dash_last_error"] = None if dash_state is None else dash_state["last_error"]
     if config is not None and getattr(config, "takeover_signals", False):
         payload["takeover_signals"] = db.takeover_counts()
+    if config is not None and getattr(config, "mcp_risk", False):
+        payload["mcp_risk"] = db.mcp_risk_counts()
     if config is not None and config.actions:
         probe = ecosyste_probe_state()
         payload["github_actions"] = {

@@ -29,6 +29,31 @@ Optional (`HUNTER_TAKEOVER_SIGNALS`, off by default). Before Scout reads a relea
 
 When a metadata read fails, Hunter leaves that signal out and stores the error. An unknown is never counted as a loss.
 
+## MCP tool and server.json signals
+
+Optional (`HUNTER_MCP_RISK`, off by default). Before Scout reads a release that is already on the MCP watchlist, Hunter reads the package as text and the registry server document. Each signal adds to a score. The classify queue takes the account-takeover score plus this score, highest first. The signals don't change a band, set a rule floor, or get copied into a Scout, Triage, or Analyst prompt.
+
+A tool description is attacker-controlled text. Hunter stores a signal id, the tool name, and a short escaped excerpt in SQLite. That excerpt is never placed in a model prompt. The stored score is capped at 200. A download or registry failure is stored and does not stop the queue; the release is still classified.
+
+With no previous archive, instruction, hidden-character, and bidi checks still run, because the description is all new. Capability signals need the same tool name in the previous archive, so the first release of a filesystem server is not treated as a new capability. `repository_changed` needs a previous server version.
+
+| Signal | Weight | What it is |
+| --- | --- | --- |
+| `tool_instruction_added` | 50 | Added description text tells a model to ignore instructions, hide something from the user, or read a credential path (`~/.ssh`, `~/.aws`, `~/.npmrc`, `id_rsa`). |
+| `tool_hidden_unicode` | 40 | Added description text contains U+200B, U+200C, U+FEFF, U+2060, or U+180E. U+200D counts only next to an ASCII letter. |
+| `tool_bidi` | 40 | Added description text contains U+202A–U+202E or U+2066–U+2069. |
+| `capability_shell` | 35 | An existing tool newly mentions a shell, bash, subprocess, or exec, or gains a `command`, `cmd`, or `shell` argument. |
+| `capability_network` | 25 | An existing tool newly mentions a url, uri, endpoint, or webhook, or gains an argument with that name. |
+| `capability_file` | 20 | An existing tool gains a `path`, `file`, `filename`, or `directory` argument, or newly says it reads or writes a file or a filesystem. |
+| `unpinned_version` | 30 | A package version or the server version is missing, empty, `latest`, or a range. Once per release. `1.2.3` and `1.2.3-beta.1` are pinned. |
+| `http_remote` | 35 | A remote URL or a package `sse` / `streamable-http` transport uses cleartext `http`, including loopback. Common on remote servers. A priority nudge, not a verdict. |
+| `many_required_secrets` | 20 | Required secrets in environment variables, remote headers, and remote variables reach `HUNTER_MCP_SECRET_MIN`. |
+| `many_required_env` | 15 | Required inputs in those same places reach `HUNTER_MCP_ENV_MIN`. |
+| `missing_repository` | 15 | No `http` or `https` repository URL. Common on remote-only servers. A priority nudge, not a verdict. |
+| `repository_changed` | 40 | The previous server version had a repository URL and the normalized URL differs. A trailing slash, a `.git` suffix, or a `www.` host does not count. A `subfolder`-only change does not count. `http` versus `https` does. |
+
+"network error", "file a bug", and "git commit" do not count as capabilities. A brand-new tool does not raise a capability signal by itself. Instruction text in that first release still counts.
+
 ## Decision model (Scout)
 
 The decision model doesn't ask Jev "is this malicious?". It asks many narrow questions, gets a probability for each, and feeds those into a small scoring model (a logistic regression in `hunter/logistic_head.json`) together with things Python measures better than a language model: counts, entropy, dependency names, and release timing. Jev and Clef are the providers. An OpenRouter chat model cannot take this role.
