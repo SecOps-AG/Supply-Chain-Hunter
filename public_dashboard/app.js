@@ -260,8 +260,11 @@ function filterFindings(catalog, params) {
 
 // Same segment encoding as hunter.public_dash.release_object_key. A slash
 // becomes ~ so the path has no %2F, then the segment is percent-encoded.
+// encodeURIComponent leaves !'()* raw; quote() does not.
 function releaseSegment(value) {
-  return encodeURIComponent(String(value).split("/").join("~"));
+  return encodeURIComponent(String(value).split("/").join("~")).replace(/[!'()*]/g, function (ch) {
+    return "%" + ch.charCodeAt(0).toString(16).toUpperCase();
+  });
 }
 
 function releaseObjectKey(ecosystem, name, version) {

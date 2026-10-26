@@ -6,6 +6,7 @@
  * The allowlist matches hunter.public_feed.allowed_public_object_key for live/
  * objects (npm, pypi, github-actions, openvsx). Feed keys are not served here.
  * A slash in a release name is a ~ in the path, never %2F. @ in a version is %40.
+ * ! ' ( ) * are percent-encoded the same way as urllib.parse.quote.
  */
 
 // Full object key (live/<rel>). Same shape as allowed_public_object_key, without feed.json.
@@ -54,11 +55,25 @@ function pathsAgree(rel, caught) {
   }
 }
 
-// Keep a segment the client already percent-encoded (%40). If the platform
-// decoded @, encode it again so the R2 key matches the publisher.
+// urllib.parse.quote encodes !'()* . encodeURIComponent does not. "~" stays.
+function quoteSegment(value) {
+  return encodeURIComponent(value).replace(/[!'()*]/g, function (ch) {
+    return "%" + ch.charCodeAt(0).toString(16).toUpperCase();
+  });
+}
+
+// Pathname may still contain %XX, or the platform may have decoded it.
+// Re-quote either form so the R2 key matches release_object_key.
 function canonicalSegment(segment) {
-  if (segment.includes("%")) return segment;
-  return encodeURIComponent(segment);
+  let text = segment;
+  if (segment.includes("%")) {
+    try {
+      text = decodeURIComponent(segment);
+    } catch (e) {
+      text = segment;
+    }
+  }
+  return quoteSegment(text);
 }
 
 function canonicalRel(rel) {

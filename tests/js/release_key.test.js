@@ -45,6 +45,8 @@ test("actions and scoped npm keys match release_object_key and contain no %2F", 
     ["npm", "@scope/pkg", "1.2.3"],
     ["pypi", "tox", "4.64.10"],
     ["npm", "vite", "8.3.4"],
+    ["pypi", "epochpkg", "1!2.0.0"],
+    ["npm", "a(b)", "1.0.0"],
   ];
   for (const [eco, name, version] of cases) {
     const key = releaseObjectKey(eco, name, version);
@@ -57,4 +59,6 @@ test("actions and scoped npm keys match release_object_key and contain no %2F", 
   assert.match(actions, /v4%400123456789ab\.json$/);
   const scoped = releaseObjectKey("npm", "@scope/pkg", "1.2.3");
   assert.match(scoped, /%40scope~pkg/);
+  assert.match(releaseObjectKey("pypi", "epochpkg", "1!2.0.0"), /1%212\.0\.0\.json$/);
+  assert.match(releaseObjectKey("npm", "a(b)", "1.0.0"), /a%28b%29/);
 });
