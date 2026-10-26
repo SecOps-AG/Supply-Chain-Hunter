@@ -20,7 +20,7 @@ from hunter.bands import REVIEW_THRESHOLD
 from hunter.models import Classification, ReleaseMeta, RuleReport
 from hunter.registry import PACKAGE_DOWNLOAD_MAX_BYTES, FeedError, HttpGet, fetch_capped, http_get, parse_time
 from hunter.rubygems import ECOSYSTEM, allowed_gem_url, registry_url, valid_name, valid_version
-from hunter.rubygems.archive import extract_gem
+from hunter.rubygems.archive import REFUSED_KEY, extract_gem
 from hunter.rules.engine import scan_release
 from hunter.triage import changed_diffs
 
@@ -29,6 +29,7 @@ log = logging.getLogger("hunter.rubygems.review")
 MODEL_ID = "deterministic"
 STRONG_PROBABILITY = 0.55
 ROUTE_RULES = frozenset({"rb_eval_fetch", "rb_extconf_fetch"})
+REFUSED_SIGNAL = "gem_refused_member:"
 _NORMAL_EXTCONF = re.compile(r"^ext(?:/[^/]+)*/extconf\.rb$")
 _CURL = "curl"
 _WGET = "wget"
@@ -50,17 +51,23 @@ def _number(row: dict | None) -> str:
     return str(row.get("number") or row.get("version") or "").strip()
 
 
-def _ruby_rows(rows: list) -> list[dict]:
-    found = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        if str(row.get("platform") or "ruby").strip() != "ruby":
-            continue
-        if not _number(row):
-            continue
-        found.append(row)
-    return found
+def _platform(row: dict) -> str:
+    return str(row.get("platform") or "ruby").strip() or "ruby"
+
+
+def release_key(row: dict | None) -> str:
+    """The stored version: the number, plus ``-<platform>`` for a platform build."""
+    if not isinstance(row, dict):
+        return ""
+    number = _number(row)
+    if not number:
+        return ""
+    platform = _platform(row)
+    return number if platform == "ruby" else f"{number}-{platform}"
+
+
+def _platform_rows(rows: list, platform: str) -> list[dict]:
+    return [row for row in rows if isinstance(row, dict) and _number(row) and _platform(row) == platform]
 
 
 def _yanked(row: dict) -> bool:
@@ -68,11 +75,12 @@ def _yanked(row: dict) -> bool:
 
 
 def predecessor_row(rows: list, version: str) -> dict | None:
-    """Newest older non-yanked ruby row. ``rows`` is newest first, as the versions API returns it."""
+    """Newest older non-yanked row of the same platform. ``rows`` is newest first, as the versions API returns it."""
+    current = _release_row(rows, version)
+    platform = _platform(current) if current is not None else "ruby"
     seen = False
-    for row in _ruby_rows(rows):
-        number = _number(row)
-        if number == version:
+    for row in _platform_rows(rows, platform):
+        if release_key(row) == version:
             seen = True
             continue
         if not seen or _yanked(row):
@@ -116,9 +124,9 @@ def _version_list(base: str, name: str, transport: HttpGet) -> list:
     return _json_list(transport(url, 60), "versions")
 
 
-def _ruby_row(rows: list, version: str) -> dict | None:
-    for row in _ruby_rows(rows):
-        if _number(row) == version:
+def _release_row(rows: list, version: str) -> dict | None:
+    for row in rows:
+        if isinstance(row, dict) and release_key(row) == version:
             return row
     return None
 
@@ -183,15 +191,23 @@ def spec_signals(old_spec: dict, new_spec: dict) -> list[str]:
         found.append("gem_extension_added")
     if _shell_terms(_message(new_spec)) - _shell_terms(_message(old_spec)):
         found.append("gem_post_install_shell")
+    refused = new_spec.get(REFUSED_KEY) if isinstance(new_spec, dict) else None
+    if isinstance(refused, list):
+        found.extend(f"{REFUSED_SIGNAL}{path}" for path in refused if isinstance(path, str))
     return found
 
 
 def routes(signals: list[str], report: RuleReport | None) -> bool:
-    """Send to Triage only for a remote eval, a fetching extension, a stray extension path, or a shell post-install."""
+    """Send to Triage for a malicious verdict, a remote eval, a fetching extension, a stray extension path,
+    a shell post-install, or a skipped archive member."""
     if "gem_extension_added" in signals or "gem_post_install_shell" in signals:
+        return True
+    if any(sig.startswith(REFUSED_SIGNAL) for sig in signals):
         return True
     if report is None:
         return False
+    if report.verdict == "malicious":
+        return True
     return bool({hit.rule for hit in report.hits} & ROUTE_RULES)
 
 
@@ -287,10 +303,10 @@ def open_release(config, name: str, version: str, rank, *, previous: str | None,
     old_row = None
     if previous is None:
         old_row = predecessor_row(rows, version)
-        previous = _number(old_row) or None
+        previous = release_key(old_row) or None
     else:
-        old_row = _ruby_row(rows, previous)
-    new_row = _ruby_row(rows, version)
+        old_row = _release_row(rows, previous)
+    new_row = _release_row(rows, version)
     new_files = DiskTree.empty()
     old_files = DiskTree.empty()
     try:

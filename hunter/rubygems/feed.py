@@ -78,11 +78,18 @@ def _queue(db: Database, name: str, version: str, max_pending: int | None) -> st
 
 
 def _consider(row: dict) -> tuple[str, str] | None:
-    """A ruby-platform release to queue, or None when the row is skipped."""
+    """A release to queue, or None when the row is skipped.
+
+    A platform build is its own release, stored as ``<number>-<platform>``.
+    """
     name = str(row.get("name") or "").strip()
-    version = str(row.get("version") or row.get("number") or "").strip()
-    platform = str(row.get("platform") or "").strip()
-    if platform != "ruby" or _yanked(row) or not valid_name(name) or not valid_version(version):
+    number = str(row.get("version") or row.get("number") or "").strip()
+    platform = str(row.get("platform") or "").strip() or "ruby"
+    if _yanked(row):
+        return None
+    version = number if platform == "ruby" else f"{number}-{platform}"
+    if not valid_name(name) or not valid_version(number) or not valid_version(version):
+        log.info("RubyGems: skipping %r %r %r", name[:80], number[:40], platform[:40])
         return None
     return name, version
 
