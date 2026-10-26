@@ -142,6 +142,26 @@ rule rs_exfil_post
         $post in (@priv[i] .. @priv[i] + 400) or
         $upost in (@priv[i] .. @priv[i] + 400) or
         $method in (@priv[i] .. @priv[i] + 400)
+      ) or
+      for any i in (1 .. #secret) : (
+        $post in (@secret[i] .. @secret[i] + 400) or
+        $upost in (@secret[i] .. @secret[i] + 400) or
+        $method in (@secret[i] .. @secret[i] + 400)
+      ) or
+      for any i in (1 .. #mnemonic) : (
+        $post in (@mnemonic[i] .. @mnemonic[i] + 400) or
+        $upost in (@mnemonic[i] .. @mnemonic[i] + 400) or
+        $method in (@mnemonic[i] .. @mnemonic[i] + 400)
+      ) or
+      for any i in (1 .. #seed) : (
+        $post in (@seed[i] .. @seed[i] + 400) or
+        $upost in (@seed[i] .. @seed[i] + 400) or
+        $method in (@seed[i] .. @seed[i] + 400)
+      ) or
+      for any i in (1 .. #wallet) : (
+        $post in (@wallet[i] .. @wallet[i] + 400) or
+        $upost in (@wallet[i] .. @wallet[i] + 400) or
+        $method in (@wallet[i] .. @wallet[i] + 400)
       )
     )
 }
