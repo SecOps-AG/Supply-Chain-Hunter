@@ -198,6 +198,20 @@ def _base_name(path: str) -> str:
     return PurePosixPath(path.replace("\\", "/")).name.lower()
 
 
+# Modules the stubs above load with ``__import__``.
+_STUB_DUNDER_IMPORTS = {"importlib", "importlib.util", "importlib.machinery", "_distutils_hack"}
+_DUNDER_IMPORT = re.compile(r"__import__\(\s*(?:['\"]([\w.]*)['\"])?")
+
+
+def _extra_imports(line: str) -> bool:
+    """True when a stub line imports anything after its own first statement."""
+    rest = line.strip().split(";")[1:]
+    for statement in rest:
+        if re.match(r"\s*(?:import|from)\s", statement):
+            return True
+    return any(match.group(1) not in _STUB_DUNDER_IMPORTS for match in _DUNDER_IMPORT.finditer(line))
+
+
 def pth_import_lines(path: str, text: str) -> list[tuple[int, str]]:
     """Lines of a .pth file that Python runs at startup, minus the packaging-tool stubs."""
     name = _base_name(path)
@@ -208,7 +222,7 @@ def pth_import_lines(path: str, text: str) -> list[tuple[int, str]]:
     for number, line in enumerate(text.splitlines(), start=1):
         if not line.startswith(_PTH_IMPORT_PREFIX):
             continue
-        if any(rule.match(line.strip()) for rule in allowed):
+        if any(rule.match(line.strip()) for rule in allowed) and not _extra_imports(line):
             continue
         found.append((number, line))
     return found
