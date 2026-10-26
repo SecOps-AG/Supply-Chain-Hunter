@@ -343,6 +343,30 @@ def _cmd_models(args, config: Config) -> int:
     return 0
 
 
+def _cmd_mcp(args, config: Config) -> int:
+    """MCP registry by hand: poll once and catch up new names, or print the checkpoint."""
+    from hunter.service import mcp_registry_health, poll_mcp_and_catchup
+
+    db = Database(config.db_path)
+    try:
+        if args.mcp_command == "poll":
+            stats = poll_mcp_and_catchup(db, config, http_get)
+            print(
+                f"pages {stats['pages']} added {stats['added']} "
+                f"npm {stats['npm']} pypi {stats['pypi']} checkpoint {stats['checkpoint']}"
+            )
+        payload = mcp_registry_health(db)
+        json.dump(payload, sys.stdout, indent=2, sort_keys=True)
+        sys.stdout.write("\n")
+    except Exception as exc:
+        db.mark_poll_error("mcp", str(exc))
+        print(str(exc), file=sys.stderr)
+        return 1
+    finally:
+        db.close()
+    return 0
+
+
 def _cmd_actions(args, config: Config) -> int:
     """GitHub Actions watcher by hand: rebuild the watchlist, poll tags once, or show counts."""
     from hunter.actions import ECOSYSTEM
@@ -488,6 +512,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     evaluate.add_argument("--output")
     evaluate.set_defaults(func=_cmd_eval)
+
+    mcp = sub.add_parser("mcp", help="MCP registry watchlist: poll the registry once, or show the checkpoint")
+    mcp_sub = mcp.add_subparsers(dest="mcp_command", required=True)
+    mcp_sub.add_parser("poll", help="read the registry once and catch up new npm and PyPI names").set_defaults(
+        func=_cmd_mcp
+    )
+    mcp_sub.add_parser("status", help="print package counts, the checkpoint, last success, and last error").set_defaults(
+        func=_cmd_mcp
+    )
 
     actions = sub.add_parser("actions", help="GitHub Actions watcher: refresh the watchlist, poll tags once, or show counts")
     actions_sub = actions.add_subparsers(dest="actions_command", required=True)

@@ -352,6 +352,9 @@ class Config:
     mcp_risk_batch: int = 8
     mcp_secret_min: int = 5
     mcp_env_min: int = 8
+    # Hours of releases to consider when an MCP name is first seen (HUNTER_MCP_CATCHUP_HOURS).
+    # Floored at the poll interval so a release during the poll is still inside the window.
+    mcp_catchup_hours: float = 48.0
     # Open VSX extensions through the registry changes feed (HUNTER_OPENVSX). Off by default.
     # Rules read every release. A new extensionPack or extensionDependencies id routes on its own.
     # With HUNTER_OPENVSX_SCOUT on, Scout reads a malicious verdict or a hit with a manifest change.
@@ -444,6 +447,7 @@ class Config:
             else:
                 analyst_base_url = resolve_openrouter_base_url("")
         top_n = int(os.environ.get("HUNTER_TOP_N", "15000"))
+        mcp_poll_interval = max(300.0, float(os.environ.get("HUNTER_MCP_POLL_INTERVAL", "3600")))
         return cls(
             db_path=Path(os.environ.get("HUNTER_DB", "hunter.sqlite3")),
             top_n=top_n,
@@ -551,11 +555,15 @@ class Config:
             osv_api=os.environ.get("HUNTER_OSV_API", "").strip() or OSV_API,
             mcp_registry=_flag("HUNTER_MCP_REGISTRY"),
             mcp_registry_url=os.environ.get("HUNTER_MCP_REGISTRY_URL", "").strip().rstrip("/") or MCP_REGISTRY_URL,
-            mcp_poll_interval=max(300.0, float(os.environ.get("HUNTER_MCP_POLL_INTERVAL", "3600"))),
+            mcp_poll_interval=mcp_poll_interval,
             mcp_risk=_flag("HUNTER_MCP_RISK"),
             mcp_risk_batch=max(1, int(os.environ.get("HUNTER_MCP_RISK_BATCH", "8"))),
             mcp_secret_min=max(0, int(os.environ.get("HUNTER_MCP_SECRET_MIN", "5"))),
             mcp_env_min=max(0, int(os.environ.get("HUNTER_MCP_ENV_MIN", "8"))),
+            mcp_catchup_hours=max(
+                mcp_poll_interval / 3600.0,
+                float(os.environ.get("HUNTER_MCP_CATCHUP_HOURS", "48")),
+            ),
             openvsx=_flag("HUNTER_OPENVSX"),
             openvsx_url=os.environ.get("HUNTER_OPENVSX_URL", "").strip().rstrip("/") or OPENVSX_URL,
             openvsx_poll_interval=max(60.0, float(os.environ.get("HUNTER_OPENVSX_POLL_INTERVAL", "300"))),

@@ -9,6 +9,9 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
+from datetime import datetime, timedelta, timezone
+
+from hunter.cli import main
 from hunter.config import Config
 from hunter.db import Database
 from hunter.mcp_registry import package_name, poll_mcp_registry, server_packages
@@ -19,7 +22,16 @@ from hunter.openvsx.review import manifest_signals, predecessor, routes, scout_r
 from hunter.public_feed import PublicAlert, alert_title, public_registry_url
 from hunter.registry import FeedError
 from hunter.rules.registry import load_pack
-from hunter.service import ReleaseLoader, classify_job, health_payload, poll_npm, poll_pypi
+from hunter.service import (
+    ReleaseLoader,
+    _poll_mcp_registry_safely,
+    classify_job,
+    health_payload,
+    poll_mcp_and_catchup,
+    poll_npm,
+    poll_pypi,
+    run_cycle,
+)
 
 MCP = "https://mcp.example"
 VSX = "https://vsx.example"
@@ -51,16 +63,19 @@ def test_both_sources_are_off_by_default(monkeypatch):
     assert config.openvsx is False
     assert config.openvsx_scout is False
     assert config.mcp_poll_interval == 3600.0
+    assert config.mcp_catchup_hours == 48.0
 
 
 def test_flags_turn_each_source_on_separately(monkeypatch):
     monkeypatch.setenv("HUNTER_MCP_REGISTRY", "1")
     monkeypatch.setenv("HUNTER_OPENVSX", "0")
     monkeypatch.setenv("HUNTER_MCP_POLL_INTERVAL", "5")
+    monkeypatch.setenv("HUNTER_MCP_CATCHUP_HOURS", "0.01")
     monkeypatch.setenv("HUNTER_OPENVSX_PAGE_SIZE", "5000")
     config = Config.from_env()
     assert config.mcp_registry is True and config.openvsx is False
     assert config.mcp_poll_interval == 300.0
+    assert config.mcp_catchup_hours == pytest.approx(300 / 3600)
     assert config.openvsx_page_size == 1000
 
 
@@ -118,8 +133,12 @@ def test_first_poll_reads_every_page_then_later_polls_ask_for_updates_only(tmp_p
     )
     assert poll_mcp_registry(db, config, feed) == 2
     assert "updated_since" not in _query(feed.urls[0])
+    assert _query(feed.urls[0])["version"] == "latest"
     assert _query(feed.urls[1])["cursor"] == "a/remote:1.0.0"
-    assert db.get_checkpoint("mcp") == "2026-10-03T00:00:00Z"
+    assert _query(feed.urls[1])["version"] == "latest"
+    first = db.get_checkpoint("mcp")
+    assert first is not None and first.endswith("Z") and "." not in first
+    assert first != "2026-10-03T00:00:00Z"
     assert db.mcp_counts() == {"npm": 1, "pypi": 1}
     assert db.last_poll()["mcp"]
 
@@ -127,8 +146,9 @@ def test_first_poll_reads_every_page_then_later_polls_ask_for_updates_only(tmp_p
         {None: {"servers": [_server("a/one", [{"registryType": "npm", "identifier": "mcp-one"}], "2026-10-04T00:00:00Z")], "metadata": {}}}
     )
     assert poll_mcp_registry(db, config, later) == 0
-    assert _query(later.urls[0])["updated_since"] == "2026-10-03T00:00:00Z"
-    assert db.get_checkpoint("mcp") == "2026-10-04T00:00:00Z"
+    assert _query(later.urls[0])["updated_since"] == first
+    assert _query(later.urls[0])["version"] == "latest"
+    assert db.get_checkpoint("mcp") != "2026-10-04T00:00:00Z"
 
 
 def test_a_failed_page_keeps_the_checkpoint(tmp_path):
@@ -206,6 +226,272 @@ def test_npm_poll_queues_an_mcp_package_release(tmp_path):
 
     assert poll_npm(db, config, transport) == 1
     assert [(job["name"], job["version"]) for job in db.pending_jobs()] == [("mcp-one", "1.1.0")]
+
+
+def _freeze_clock(monkeypatch, clock: dict):
+    monkeypatch.setattr("hunter.mcp_registry.utcnow", lambda: clock["now"])
+    monkeypatch.setattr("hunter.service.utcnow", lambda: clock["now"])
+
+
+def test_page_cap_does_not_move_the_checkpoint(tmp_path, monkeypatch):
+    monkeypatch.setattr("hunter.mcp_registry.MAX_PAGES", 1)
+    db = Database(tmp_path / "hunter.sqlite3")
+    db.set_checkpoint("mcp", "2026-10-01T00:00:00Z")
+    config = _config(tmp_path, mcp_registry=True)
+    feed = McpRegistry(
+        {
+            None: {
+                "servers": [_server("a/x", [{"registryType": "npm", "identifier": "x-mcp"}], "2026-10-09T00:00:00Z")],
+                "metadata": {"nextCursor": "next"},
+            },
+            "next": {"servers": [], "metadata": {}},
+        }
+    )
+    _poll_mcp_registry_safely(db, config, feed, None)
+    assert db.get_checkpoint("mcp") == "2026-10-01T00:00:00Z"
+    assert "stopped after 1 pages" in db.poll_last_error("mcp")
+    assert db.mcp_package_names("npm") == {"x-mcp"}
+
+
+def test_checkpoint_is_poll_start_minus_the_overlap(tmp_path, monkeypatch):
+    # String order says the unzoned stamp is newer. Time order says the fractional one is.
+    clock = {"now": datetime(2026, 10, 26, 12, 0, tzinfo=timezone.utc)}
+    _freeze_clock(monkeypatch, clock)
+    db = Database(tmp_path / "hunter.sqlite3")
+    db.set_checkpoint("mcp", "2099-01-01T00:00:00Z")
+    config = _config(tmp_path, mcp_registry=True)
+    feed = McpRegistry(
+        {
+            None: {
+                "servers": [
+                    _server("a/early", [{"registryType": "npm", "identifier": "early-mcp"}], "2026-10-26T00:00:00Z"),
+                    _server("a/later", [{"registryType": "npm", "identifier": "later-mcp"}], "2026-10-26T00:00:00.5Z"),
+                ],
+                "metadata": {"nextCursor": "a/later:1.0.0"},
+            },
+            "a/later:1.0.0": {"servers": [], "metadata": {}},
+        }
+    )
+    assert poll_mcp_registry(db, config, feed) == 2
+    assert _query(feed.urls[0])["updated_since"] == "2099-01-01T00:00:00Z"
+    assert _query(feed.urls[0])["version"] == "latest"
+    assert _query(feed.urls[1])["version"] == "latest"
+    assert db.get_checkpoint("mcp") == "2026-10-26T11:55:00Z"
+    clock["now"] = clock["now"] + timedelta(hours=1)
+    later = McpRegistry({None: {"servers": [], "metadata": {}}})
+    assert poll_mcp_registry(db, config, later) == 0
+    assert _query(later.urls[0])["updated_since"] == "2026-10-26T11:55:00Z"
+    assert _query(later.urls[0])["version"] == "latest"
+    assert db.get_checkpoint("mcp") == "2026-10-26T12:55:00Z"
+
+
+def test_a_new_name_queues_only_the_newest_release_inside_the_lookback(tmp_path, monkeypatch):
+    clock = {"now": datetime(2026, 10, 26, 12, 0, tzinfo=timezone.utc)}
+    _freeze_clock(monkeypatch, clock)
+    db = Database(tmp_path / "hunter.sqlite3")
+    config = _config(
+        tmp_path,
+        mcp_registry=True,
+        npm_registry="https://npm.example",
+        pypi_base="https://pypi.example",
+    )
+    packument = {
+        "time": {
+            "created": "2020-01-01T00:00:00.000Z",
+            "modified": "2026-10-26T11:00:00.000Z",
+            "0.1.0": "2020-01-01T00:00:00.000Z",
+            "0.9.0": "2026-10-25T12:00:00.000Z",
+            "1.2.0": "2026-10-26T11:00:00.000Z",
+        }
+    }
+    project = {
+        "releases": {
+            "0.1.0": [{"upload_time_iso_8601": "2020-01-01T00:00:00Z"}],
+            "0.9.0": [{"upload_time_iso_8601": "2026-10-25T12:00:00Z"}],
+            "1.0.0": [{"upload_time_iso_8601": "2026-10-26T11:30:00Z"}],
+        }
+    }
+    hits: list[str] = []
+
+    def transport(url, timeout):
+        hits.append(url)
+        if "/v0.1/servers" in url:
+            return json.dumps(
+                {
+                    "servers": [
+                        _server("a/one", [{"registryType": "npm", "identifier": "mcp-one"}], "2026-10-26T11:00:00Z"),
+                        _server("a/py", [{"registryType": "pypi", "identifier": "py-mcp"}], "2026-10-26T11:30:00Z"),
+                    ],
+                    "metadata": {},
+                }
+            ).encode()
+        if url == "https://npm.example/mcp-one":
+            return json.dumps(packument).encode()
+        if url == "https://pypi.example/py-mcp/json":
+            return json.dumps(project).encode()
+        raise AssertionError(url)
+
+    stats = poll_mcp_and_catchup(db, config, transport)
+    assert stats["added"] == 2
+    assert sorted((job["ecosystem"], job["name"], job["version"], job["rank"]) for job in db.pending_jobs()) == [
+        ("npm", "mcp-one", "1.2.0", None),
+        ("pypi", "py-mcp", "1.0.0", None),
+    ]
+    assert db.get_package_cursor("npm", "mcp-one")[0] == "1.2.0"
+    assert db.get_package_cursor("pypi", "py-mcp")[0] == "1.0.0"
+    seen = len(hits)
+    again = poll_mcp_and_catchup(db, config, transport)
+    assert again["added"] == 0
+    assert sorted((job["name"], job["version"]) for job in db.pending_jobs()) == [("mcp-one", "1.2.0"), ("py-mcp", "1.0.0")]
+    assert [url for url in hits[seen:] if "/v0.1/servers" not in url] == []
+
+
+def test_a_failed_catchup_keeps_the_checkpoint_and_retries(tmp_path, monkeypatch):
+    clock = {"now": datetime(2026, 10, 26, 12, 0, tzinfo=timezone.utc)}
+    _freeze_clock(monkeypatch, clock)
+    db = Database(tmp_path / "hunter.sqlite3")
+    config = _config(tmp_path, mcp_registry=True, npm_registry="https://npm.example")
+    reads = {"n": 0}
+
+    def transport(url, timeout):
+        if "/v0.1/servers" in url:
+            return json.dumps(
+                {
+                    "servers": [_server("a/one", [{"registryType": "npm", "identifier": "mcp-one"}], "2026-10-26T11:00:00Z")],
+                    "metadata": {},
+                }
+            ).encode()
+        reads["n"] += 1
+        if reads["n"] == 1:
+            raise FeedError("npm down")
+        return json.dumps({"time": {"1.2.0": "2026-10-26T11:00:00.000Z"}}).encode()
+
+    poll_mcp_and_catchup(db, config, transport)
+    assert db.get_checkpoint("mcp") == "2026-10-26T11:55:00Z"
+    assert db.pending_jobs() == []
+    assert db.get_package_cursor("npm", "mcp-one") == (None, None)
+    clock["now"] = clock["now"] + timedelta(hours=1)
+    poll_mcp_and_catchup(db, config, transport)
+    assert db.get_checkpoint("mcp") == "2026-10-26T12:55:00Z"
+    assert [(job["name"], job["version"], job["rank"]) for job in db.pending_jobs()] == [("mcp-one", "1.2.0", None)]
+
+
+def test_a_deleted_server_does_not_remove_a_package(tmp_path):
+    db = Database(tmp_path / "hunter.sqlite3")
+    db.add_mcp_packages([("npm", "kept", "a/kept")])
+
+    def transport(url, timeout):
+        return json.dumps(
+            {
+                "servers": [
+                    {
+                        "server": {"name": "a/kept", "packages": [{"registryType": "npm", "identifier": "kept"}]},
+                        "_meta": {
+                            "io.modelcontextprotocol.registry/official": {
+                                "status": "deleted",
+                                "updatedAt": "2026-10-02T00:00:00Z",
+                            }
+                        },
+                    },
+                    {
+                        "server": {
+                            "name": "a/new",
+                            "packages": [{"registryType": "pypi", "identifier": "also-kept"}],
+                        },
+                        "_meta": {
+                            "io.modelcontextprotocol.registry/official": {
+                                "status": "deleted",
+                                "updatedAt": "2026-10-02T00:00:00Z",
+                            }
+                        },
+                    },
+                ],
+                "metadata": {},
+            }
+        ).encode()
+
+    assert poll_mcp_registry(db, _config(tmp_path), transport) == 1
+    assert "kept" in db.mcp_package_names("npm")
+    assert db.mcp_package_names("pypi") == {"also-kept"}
+
+
+def test_run_cycle_reads_the_registry_before_npm(tmp_path):
+    db = Database(tmp_path / "hunter.sqlite3")
+    db.replace_watchlist("npm", [("left-pad", 1, 10)])
+    db.replace_watchlist("pypi", [("requests", 1, 10)])
+    db.set_checkpoint("npm", "1")
+    db.set_checkpoint("pypi", "1")
+    order: list[str] = []
+
+    class Feed:
+        def last_serial(self):
+            return 1
+
+        def since(self, _serial):
+            order.append("pypi")
+            return []
+
+    def transport(url, timeout):
+        order.append(url)
+        if "/v0.1/servers" in url:
+            return json.dumps({"servers": [], "metadata": {}}).encode()
+        return json.dumps({"results": [], "last_seq": "1"}).encode()
+
+    config = _config(
+        tmp_path,
+        mcp_registry=True,
+        npm_changes="https://replicate.example",
+        npm_registry="https://npm.example",
+        watchlist_refresh=1e12,
+    )
+    run_cycle(db, config, jev=object(), loader=object(), feed=Feed(), transport=transport)
+    registry_at = next(i for i, item in enumerate(order) if "/v0.1/servers" in item)
+    npm_at = next(i for i, item in enumerate(order) if "/_changes" in item)
+    assert registry_at < npm_at
+    assert _query(order[registry_at])["version"] == "latest"
+
+
+def test_health_includes_last_error_after_a_failed_poll(tmp_path):
+    db = Database(tmp_path / "hunter.sqlite3")
+    config = _config(tmp_path, mcp_registry=True)
+
+    def broken(url, timeout):
+        raise FeedError("HTTP 400: updated_since")
+
+    _poll_mcp_registry_safely(db, config, broken, None)
+    block = health_payload(db, 0.0, config=config)["mcp_registry"]
+    assert "HTTP 400: updated_since" in block["last_error"]
+    assert block["last_success_at"] is None
+    assert block["checkpoint"] is None
+    assert block["npm"] == 0 and block["pypi"] == 0
+
+
+def test_mcp_commands_print_the_poll_and_the_status(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("HUNTER_DB", str(tmp_path / "hunter.sqlite3"))
+    monkeypatch.setenv("HUNTER_LOG_DIR", str(tmp_path / "logs"))
+    monkeypatch.setenv("HUNTER_MCP_REGISTRY_URL", MCP)
+
+    def transport(url, timeout=60):
+        assert url.startswith(f"{MCP}/v0.1/servers?")
+        assert _query(url)["version"] == "latest"
+        return json.dumps(
+            {"servers": [_server("a/remote", [], "2026-10-01T00:00:00Z")], "metadata": {}}
+        ).encode()
+
+    monkeypatch.setattr("hunter.cli.http_get", transport)
+    assert main(["mcp", "poll"]) == 0
+    polled = capsys.readouterr().out
+    line, body = polled.split("\n", 1)
+    assert line.startswith("pages 1 added 0 npm 0 pypi 0 checkpoint ")
+    payload = json.loads(body)
+    assert payload["checkpoint"] == line.rsplit(" ", 1)[1]
+    assert payload["npm"] == 0 and payload["pypi"] == 0
+    assert payload["last_error"] is None
+    assert payload["last_success_at"]
+    assert main(["mcp", "status"]) == 0
+    status = json.loads(capsys.readouterr().out)
+    assert status["checkpoint"] == payload["checkpoint"]
+    assert status["last_success_at"] == payload["last_success_at"]
 
 
 # --- Open VSX feed ------------------------------------------------------------
@@ -813,5 +1099,11 @@ def test_public_feed_and_health_know_both_sources(tmp_path):
     off = health_payload(db, 0.0, config=_config(tmp_path))
     assert "mcp_registry" not in off and "openvsx" not in off
     on = health_payload(db, 0.0, config=_config(tmp_path, mcp_registry=True, openvsx=True))
-    assert on["mcp_registry"] == {"npm": 1, "pypi": 0}
+    assert on["mcp_registry"] == {
+        "npm": 1,
+        "pypi": 0,
+        "checkpoint": None,
+        "last_success_at": None,
+        "last_error": None,
+    }
     assert on["openvsx"] == {"active": 0, "removed": 0, "other": 0}

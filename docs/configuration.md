@@ -171,15 +171,16 @@ The summary has `malicious_seen`, `caught`, `missed`, `recall`, `confirmed`, `co
 
 ## MCP registry
 
-Off by default. When on, Hunter polls the official MCP server registry (`/v0.1/servers?updated_since=...`, following `metadata.nextCursor`) about once an hour. The first poll reads the whole registry. Each server entry's npm and PyPI packages join the npm and PyPI watch whatever their download rank, so their new releases go through the usual rules, Scout, Triage and Analyst. Docker/OCI images, `.mcpb` bundles, remote-only servers and packages hosted on other registries are skipped. Names are kept after a ranked watchlist refresh and are never removed. They are not counted as popular names in the typosquat check.
+Off by default. When on, Hunter polls the official MCP server registry (`/v0.1/servers?version=latest&limit=100`, following `metadata.nextCursor`) about once an hour. Names live in `mcp_packages`. The poll uses `version=latest`, so each server contributes one row. The checkpoint is the poll start minus 5 minutes, and it is written only after a finished walk. Each server entry's npm and PyPI packages join the npm and PyPI watch whatever their download rank, so their new releases go through the usual rules, Scout, Triage and Analyst. When a name is first seen, only versions inside the catch-up window are queued, and only the newest of those. Docker/OCI images, `.mcpb` bundles, remote-only servers and packages hosted on other registries are skipped. Names are kept after a ranked watchlist refresh and are never removed. They are not counted as popular names in the typosquat check.
 
 | Variable | Default | What it does |
 | --- | --- | --- |
 | `HUNTER_MCP_REGISTRY` | off | `on` adds MCP server packages to the npm and PyPI watch. |
 | `HUNTER_MCP_REGISTRY_URL` | `https://registry.modelcontextprotocol.io` | Registry origin. |
 | `HUNTER_MCP_POLL_INTERVAL` | `3600` | Seconds between polls (at least 300). |
+| `HUNTER_MCP_CATCHUP_HOURS` | `48` | How far back to look when a name is first seen. At least as long as the poll interval. |
 
-Localhost `/health` adds an `mcp_registry` block with the number of npm and PyPI names it added.
+Localhost `/health` adds an `mcp_registry` block with the npm and PyPI counts, the checkpoint, `last_success_at`, and `last_error`. `hunter mcp poll` runs one poll and catch-up. `hunter mcp status` prints the same counts.
 
 ## Open VSX
 
