@@ -278,7 +278,8 @@ def review_trees(
                 scout.band = "review"
                 scout.malice_probability = max(scout.malice_probability, REVIEW_THRESHOLD)
         return scout
-    if routes(signals, report):
+    # With Scout off, what Scout would have read goes to Triage.
+    if routes(signals, report) or (jev is None and scout_reads(signals, report)):
         strong = report.verdict == "malicious"
         row = _row(meta, band="review", probability=STRONG_PROBABILITY if strong else REVIEW_THRESHOLD, signals=signals)
         row.needs_llm_review = True
