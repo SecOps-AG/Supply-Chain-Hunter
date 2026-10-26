@@ -15,7 +15,7 @@ from typing import Any
 from urllib.parse import quote
 
 from hunter.config import Config, active_role_models
-from hunter.dashboard import RANGES, _triage_verdict, findings, release, release_key, snapshot
+from hunter.dashboard import RANGES, _since, _triage_verdict, findings, release, release_key, snapshot
 from hunter.dashboard.benchmark import load_benchmarks
 from hunter.db import Database, iso, utcnow
 from hunter.public_feed import (
@@ -97,16 +97,14 @@ def public_snapshot(
     meter,
     range_name: str,
     now: datetime | None = None,
+    health: dict | None = None,
 ) -> dict[str, Any]:
     """Explicit allowlist projection of ``dashboard.snapshot`` for one range."""
-    from hunter.service import health_payload
-
-    health = health_payload(db, started, config.scout_model_id(), config, meter)
-    for meta in ("dash_last_published_at", "dash_last_error", "feed_last_published_at", "feed_last_error"):
-        health.pop(meta, None)
+    if health is None:
+        health = _snapshot_health(db, config, started=started, meter=meter)
     raw = snapshot(
         db,
-        health=health,
+        health=copy.deepcopy(health),
         models=active_role_models(config),
         range_name=range_name,
         now=now,
@@ -119,6 +117,60 @@ def public_snapshot(
         row["models"] = public_models(row["models"])
     row = sanitize_public(row, config)
     return row
+
+
+def _snapshot_health(db: Database, config: Config, *, started: float, meter) -> dict:
+    from hunter.service import health_payload
+
+    health = health_payload(db, started, config.scout_model_id(), config, meter)
+    for meta in ("dash_last_published_at", "dash_last_error", "feed_last_published_at", "feed_last_error"):
+        health.pop(meta, None)
+    return health
+
+
+class _CycleReader:
+    """Read-through view of the database for one publish cycle.
+
+    The four snapshots and eight findings blocks of a cycle ask for the same rows over
+    nested time ranges. Each ``*_since`` list query is ordered newest first with the
+    same limit, so a shorter range is a prefix of the widest one: it is read once for
+    the widest range and filtered in memory. Other repeated reads with the same
+    arguments are answered from a per-cycle memo. Every other method goes to the
+    database unchanged.
+    """
+
+    _PREFIX_QUERIES = frozenset(
+        {"flagged_releases_since", "investigations_since", "analyst_reviews_since", "outbox_since"}
+    )
+    _MEMO_QUERIES = frozenset({"last_poll", "poll_errors", "scout_usage_since"})
+    _PREFIX_LIMIT = 5000
+
+    def __init__(self, db: Database, *, widest_since: str) -> None:
+        self._db = db
+        self._widest_since = widest_since
+        self._rows: dict[str, list[dict]] = {}
+        self._memo: dict[tuple, Any] = {}
+
+    def __getattr__(self, name: str) -> Any:
+        target = getattr(self._db, name)
+        if name in self._PREFIX_QUERIES:
+            return lambda since, limit=self._PREFIX_LIMIT: self._prefix(name, target, since, limit)
+        if name in self._MEMO_QUERIES:
+            return lambda *args: self._memoized(name, target, args)
+        return target
+
+    def _prefix(self, name: str, target, since: str, limit: int) -> list[dict]:
+        if limit != self._PREFIX_LIMIT or since < self._widest_since:
+            return target(since, limit)
+        if name not in self._rows:
+            self._rows[name] = target(self._widest_since, self._PREFIX_LIMIT)
+        return [dict(row) for row in self._rows[name] if str(row["created_at"]) >= since]
+
+    def _memoized(self, name: str, target, args: tuple) -> Any:
+        key = (name, args)
+        if key not in self._memo:
+            self._memo[key] = target(*args)
+        return copy.deepcopy(self._memo[key])
 
 
 def public_health(health: Any) -> dict[str, Any]:
@@ -414,9 +466,11 @@ def build_live_document(
     now: datetime | None = None,
 ) -> dict[str, Any]:
     now = now or utcnow()
+    db = _CycleReader(db, widest_since=min(_since(now, range_name) for range_name in RANGES))
+    health = _snapshot_health(db, config, started=started, meter=meter)
     snapshots = {
         range_name: public_snapshot(
-            db, config, started=started, meter=meter, range_name=range_name, now=now
+            db, config, started=started, meter=meter, range_name=range_name, now=now, health=health
         )
         for range_name in RANGES
     }
@@ -547,7 +601,9 @@ def publish_public_dash(
 
         release_uploads: list[tuple[str, str, str, bytes]] = []
         release_keys = collect_release_keys(live_document.get("findings") or {}, live_document.get("snapshots") or {})
-        for key in sorted(release_keys):
+        # Only objects never published, or whose rows changed since, are rebuilt.
+        to_check = db.public_dash_releases_to_check(sorted(release_keys))
+        for key in sorted(to_check):
             eco, name, version = key.split(":", 2)
             detail = release(db, eco, name, version)
             if detail is None:
@@ -558,6 +614,10 @@ def publish_public_dash(
             if db.public_dash_release_hash(key) == digest:
                 continue
             release_uploads.append((key, obj_key, digest, body))
+        # A key with nothing to upload is current now; one waiting on an upload
+        # stays dirty until that upload succeeds.
+        pending = {key for key, _, _, _ in release_uploads}
+        db.clear_public_dash_dirty({key: mark for key, mark in to_check.items() if key not in pending})
 
         if not live_uploads and not bench_changed and not release_uploads:
             return False
@@ -573,6 +633,7 @@ def publish_public_dash(
         for key, obj_key, digest, body in release_uploads:
             _upload_objects(uploader, bucket, [(obj_key, body, CACHE_RELEASE)])
             db.mark_public_dash_release(key, digest)
+            db.clear_public_dash_dirty({key: to_check[key]})
         db.mark_public_dash_published_at(iso(now))
     except Exception as exc:
         message = _public_error(exc, config)

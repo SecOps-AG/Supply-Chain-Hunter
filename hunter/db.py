@@ -351,10 +351,68 @@ class Database:
             self._conn.execute("ALTER TABLE takeover_signals ADD COLUMN attempts INTEGER NOT NULL DEFAULT 1")
         if "retry_at" not in columns:
             self._conn.execute("ALTER TABLE takeover_signals ADD COLUMN retry_at TEXT")
+        self._migrate_public_dash_dirty()
         self._conn.commit()
         version = int(self._conn.execute("PRAGMA user_version").fetchone()[0])
         for step, script in enumerate(MIGRATIONS[version:], start=version + 1):
             self._conn.executescript(f"BEGIN;\n{script}\nPRAGMA user_version = {step};\nCOMMIT;")
+
+    def _migrate_public_dash_dirty(self) -> None:
+        """Triggers that note which published release objects need a rebuild.
+
+        A write to any row ``release_detail`` reads adds the release key here, but only
+        for keys already in ``public_dash_releases``. The publisher then rebuilds just
+        those objects instead of every release on the public page each cycle.
+        """
+        fresh = (
+            self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'public_dash_dirty'"
+            ).fetchone()
+            is None
+        )
+        statements = [
+            """
+            CREATE TABLE IF NOT EXISTS public_dash_dirty (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                release_key TEXT NOT NULL
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS public_dash_dirty_key ON public_dash_dirty (release_key, id)",
+        ]
+        keys = {
+            "releases": ("NEW.ecosystem || ':' || NEW.name || ':' || NEW.version",
+                         "OLD.ecosystem || ':' || OLD.name || ':' || OLD.version"),
+            "investigations": ("NEW.idempotency_key", "OLD.idempotency_key"),
+            "analyst_reviews": ("NEW.idempotency_key", "OLD.idempotency_key"),
+            "outbox": ("NEW.idempotency_key", "OLD.idempotency_key"),
+        }
+        for table, (new_key, old_key) in keys.items():
+            for event, key in (("INSERT", new_key), ("UPDATE", new_key), ("DELETE", old_key)):
+                candidates = key
+                if table == "outbox":
+                    # Analysis alerts are stored as "<release key>:analysis".
+                    candidates = (
+                        f"{key}, CASE WHEN {key} LIKE '%:analysis' "
+                        f"THEN substr({key}, 1, length({key}) - 9) END"
+                    )
+                statements.append(
+                    f"""
+                    CREATE TRIGGER IF NOT EXISTS public_dash_dirty_{table}_{event.lower()}
+                    AFTER {event} ON {table}
+                    BEGIN
+                        INSERT INTO public_dash_dirty (release_key)
+                        SELECT release_key FROM public_dash_releases
+                        WHERE release_key IN ({candidates});
+                    END
+                    """
+                )
+        for statement in statements:
+            self._conn.execute(statement)
+        if fresh:
+            # Changes made before the triggers existed are unknown; recheck everything once.
+            self._conn.execute(
+                "INSERT INTO public_dash_dirty (release_key) SELECT release_key FROM public_dash_releases"
+            )
 
     def get_checkpoint(self, ecosystem: str) -> str | None:
         with self._lock:
@@ -1675,6 +1733,52 @@ class Database:
                 ON CONFLICT(release_key) DO UPDATE SET content_hash = excluded.content_hash
                 """,
                 (release_key, content_hash),
+            )
+            self._conn.commit()
+
+    def public_dash_releases_to_check(self, release_keys: list[str]) -> dict[str, int]:
+        """Of `release_keys`, those whose public object may be missing or stale.
+
+        Returns key -> newest dirty id (0 when the key was never published). Keys that
+        were never published get a placeholder row first, so a write that lands while the
+        publisher is building their object marks them dirty for the next cycle.
+        """
+        if not release_keys:
+            return {}
+        payload = json.dumps(list(release_keys))
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT OR IGNORE INTO public_dash_releases (release_key, content_hash)
+                SELECT value, '' FROM json_each(?)
+                """,
+                (payload,),
+            )
+            rows = self._conn.execute(
+                """
+                SELECT k.value AS release_key, p.content_hash,
+                       (SELECT MAX(d.id) FROM public_dash_dirty d WHERE d.release_key = k.value) AS dirty_id
+                FROM json_each(?) k
+                JOIN public_dash_releases p ON p.release_key = k.value
+                """,
+                (payload,),
+            ).fetchall()
+            self._conn.commit()
+        return {
+            str(row["release_key"]): int(row["dirty_id"] or 0)
+            for row in rows
+            if row["content_hash"] == "" or row["dirty_id"] is not None
+        }
+
+    def clear_public_dash_dirty(self, checked: dict[str, int]) -> None:
+        """Forget dirty marks up to the ids seen when `checked` was read. Later marks stay."""
+        pairs = [(key, dirty_id) for key, dirty_id in checked.items() if dirty_id]
+        if not pairs:
+            return
+        with self._lock:
+            self._conn.executemany(
+                "DELETE FROM public_dash_dirty WHERE release_key = ? AND id <= ?",
+                pairs,
             )
             self._conn.commit()
 

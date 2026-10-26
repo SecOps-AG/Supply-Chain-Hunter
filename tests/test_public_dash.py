@@ -429,3 +429,164 @@ def test_config_reads_dash_env(monkeypatch):
     config = Config.from_env()
     assert config.dash_publish is True
     assert config.dash_public_base_url == "https://dash.example.com"
+
+
+def test_live_document_matches_uncached_reads(db, monkeypatch):
+    from hunter import public_dash
+
+    config = _dash_config()
+    now = utcnow()
+    started = time.monotonic()
+    cached = build_live_document(db, config, started=started, meter=None, now=now)
+    monkeypatch.setattr(public_dash, "_CycleReader", lambda database, widest_since: database)
+    plain = build_live_document(db, config, started=started, meter=None, now=now)
+    assert json.dumps(cached, sort_keys=True, default=str) == json.dumps(plain, sort_keys=True, default=str)
+
+
+def test_live_document_reads_each_list_once_per_cycle(db, monkeypatch):
+    calls: dict[str, int] = {}
+    for name in ("flagged_releases_since", "investigations_since", "analyst_reviews_since", "outbox_since"):
+        original = getattr(db, name)
+
+        def counted(*args, _name=name, _original=original, **kwargs):
+            calls[_name] = calls.get(_name, 0) + 1
+            return _original(*args, **kwargs)
+
+        monkeypatch.setattr(db, name, counted)
+    build_live_document(db, _dash_config(), started=time.monotonic(), meter=None)
+    assert calls == {
+        "flagged_releases_since": 1,
+        "investigations_since": 1,
+        "analyst_reviews_since": 1,
+        "outbox_since": 1,
+    }
+
+
+def _count_release_builds(monkeypatch) -> list[str]:
+    from hunter import public_dash
+
+    built: list[str] = []
+    original = public_dash.release
+
+    def counted(database, eco, name, version):
+        built.append(release_key(eco, name, version))
+        return original(database, eco, name, version)
+
+    monkeypatch.setattr(public_dash, "release", counted)
+    return built
+
+
+def _release_uploads(client) -> set[str]:
+    return {call.kwargs["Key"] for call in client.put_object.call_args_list if call.kwargs["Key"].startswith("live/r/")}
+
+
+def test_publish_rebuilds_only_changed_release_objects(db, monkeypatch):
+    config = _dash_config()
+    client = MagicMock()
+    started = time.monotonic()
+    built = _count_release_builds(monkeypatch)
+    assert publish_public_dash(db, config, started=started, meter=None, client=client, now=utcnow()) is True
+    first = set(built)
+    assert release_key("pypi", "demo-yaml", "5.0.0") in first
+
+    built.clear()
+    client.put_object.reset_mock()
+    publish_public_dash(db, config, started=started, meter=None, client=client, now=utcnow())
+    assert built == []
+    assert _release_uploads(client) == set()
+
+    db.mark_investigation_reported("pypi:demo-yaml:5.0.0", "ok\nVerdict: benign")
+    built.clear()
+    client.put_object.reset_mock()
+    publish_public_dash(db, config, started=started, meter=None, client=client, now=utcnow())
+    assert built == [release_key("pypi", "demo-yaml", "5.0.0")]
+    assert _release_uploads(client) == {release_object_key("pypi", "demo-yaml", "5.0.0")}
+
+    built.clear()
+    publish_public_dash(db, config, started=started, meter=None, client=client, now=utcnow())
+    assert built == []
+
+
+def test_analysis_alert_marks_its_release_dirty(db, monkeypatch):
+    config = _dash_config()
+    client = MagicMock()
+    started = time.monotonic()
+    built = _count_release_builds(monkeypatch)
+    publish_public_dash(db, config, started=started, meter=None, client=client, now=utcnow())
+    built.clear()
+    db.enqueue("pypi:demo-client:0.3.0:analysis", "{}")
+    publish_public_dash(db, config, started=started, meter=None, client=client, now=utcnow())
+    assert built == [release_key("pypi", "demo-client", "0.3.0")]
+
+
+def test_failed_upload_keeps_release_dirty(db, monkeypatch):
+    config = _dash_config()
+    client = MagicMock()
+    started = time.monotonic()
+    built = _count_release_builds(monkeypatch)
+    publish_public_dash(db, config, started=started, meter=None, client=client, now=utcnow())
+    db.mark_investigation_reported("pypi:demo-yaml:5.0.0", "ok\nVerdict: benign")
+    client.put_object.side_effect = RuntimeError("down")
+    built.clear()
+    assert publish_public_dash(db, config, started=started, meter=None, client=client, now=utcnow()) is False
+    assert built == [release_key("pypi", "demo-yaml", "5.0.0")]
+    client.put_object.side_effect = None
+    built.clear()
+    publish_public_dash(db, config, started=started, meter=None, client=client, now=utcnow())
+    assert built == [release_key("pypi", "demo-yaml", "5.0.0")]
+
+
+def test_only_the_failed_release_upload_stays_dirty(db, monkeypatch):
+    config = _dash_config()
+    client = MagicMock()
+    started = time.monotonic()
+    built = _count_release_builds(monkeypatch)
+    publish_public_dash(db, config, started=started, meter=None, client=client, now=utcnow())
+    db.mark_investigation_reported("pypi:demo-yaml:5.0.0", "ok\nVerdict: benign")
+    db.enqueue("pypi:demo-client:0.3.0:analysis", "{}")
+    failing = release_object_key("pypi", "demo-yaml", "5.0.0")
+
+    def put_object(**kwargs):
+        if kwargs["Key"] == failing:
+            raise TimeoutError("read timed out")
+
+    client.put_object.side_effect = put_object
+    built.clear()
+    assert publish_public_dash(db, config, started=started, meter=None, client=client, now=utcnow()) is False
+    assert sorted(built) == sorted([release_key("pypi", "demo-yaml", "5.0.0"), release_key("pypi", "demo-client", "0.3.0")])
+    client.put_object.side_effect = None
+    built.clear()
+    client.put_object.reset_mock()
+    publish_public_dash(db, config, started=started, meter=None, client=client, now=utcnow())
+    assert built == [release_key("pypi", "demo-yaml", "5.0.0")]
+    assert _release_uploads(client) == {failing}
+    built.clear()
+    publish_public_dash(db, config, started=started, meter=None, client=client, now=utcnow())
+    assert built == []
+
+
+def test_dirty_marks_after_check_survive_clear(tmp_path):
+    database = Database(tmp_path / "hunter.sqlite3")
+    key = "npm:demo-pad:1.0.1"
+    assert database.public_dash_releases_to_check([key]) == {key: 0}
+    database.mark_public_dash_release(key, "abc")
+    assert database.public_dash_releases_to_check([key]) == {}
+    database.save_release("npm", "demo-pad", "1.0.1", "benign", 0.01, None, None, "{}")
+    checked = database.public_dash_releases_to_check([key])
+    assert checked[key] > 0
+    database.save_release("npm", "demo-pad", "1.0.1", "review", 0.6, None, None, "{}", replace=True)
+    database.clear_public_dash_dirty(checked)
+    assert key in database.public_dash_releases_to_check([key])
+    database.clear_public_dash_dirty(database.public_dash_releases_to_check([key]))
+    assert database.public_dash_releases_to_check([key]) == {}
+
+
+def test_existing_published_releases_are_rechecked_after_upgrade(tmp_path):
+    path = tmp_path / "hunter.sqlite3"
+    database = Database(path)
+    database.mark_public_dash_release("npm:demo-pad:1.0.1", "abc")
+    database._conn.execute("DROP TABLE public_dash_dirty")
+    database._conn.commit()
+    database.close()
+    reopened = Database(path)
+    assert "npm:demo-pad:1.0.1" in reopened.public_dash_releases_to_check(["npm:demo-pad:1.0.1"])
