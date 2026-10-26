@@ -42,6 +42,8 @@ CLASSES = {
     "py",
     "shell",
     "pth",
+    "rb",
+    "gem_hook",
     "npm_manifest",
     "py_manifest",
     "gyp",
@@ -55,6 +57,8 @@ CLASSES = {
     "lockfile",
     "other_text",
 }
+_RB_EXT = {".rb", ".rake", ".gemspec"}
+_RB_NAMES = {"rakefile", "gemfile"}
 
 
 def expand(scope: str) -> frozenset[str]:
@@ -93,8 +97,42 @@ def _code_class(name: str, suffix: str, text: str) -> str | None:
     return None
 
 
-def file_classes(path: str, text: str = "") -> frozenset[str]:
+def _is_ruby(name: str, suffix: str) -> bool:
+    return suffix in _RB_EXT or name in _RB_NAMES
+
+
+def _is_gem_hook(lowered: str, name: str, hook_paths) -> bool:
+    """``extconf.rb``, or a path listed in the gemspec ``extensions``."""
+    if name == "extconf.rb":
+        return True
+    if not hook_paths:
+        return False
+    text = lowered[2:] if lowered.startswith("./") else lowered
+    for raw in hook_paths:
+        hook = str(raw or "").strip().replace("\\", "/").lower()
+        while hook.startswith("./"):
+            hook = hook[2:]
+        if hook and hook == text:
+            return True
+    return False
+
+
+def file_classes(path: str, text: str = "", *, hook_paths=None) -> frozenset[str]:
     """Scope classes for one file. Empty means no rule reads it."""
+    lowered = path.lower().replace("\\", "/")
+    pure = PurePosixPath(lowered)
+    classes = set(_base_classes(path, text))
+    if _is_ruby(pure.name, pure.suffix):
+        classes.discard("other_text")
+        classes.add("rb")
+    if _is_gem_hook(lowered, pure.name, hook_paths):
+        classes.discard("other_text")
+        classes.add("gem_hook")
+    return frozenset(classes)
+
+
+def _base_classes(path: str, text: str = "") -> frozenset[str]:
+    """Scope classes before Ruby and install-hook tags are added."""
     lowered = path.lower().replace("\\", "/")
     pure = PurePosixPath(lowered)
     name = pure.name

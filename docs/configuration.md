@@ -195,6 +195,20 @@ Pages are followed by the opaque `nextCursor`. `since` is inclusive and only sta
 
 Localhost `/health` adds an `openvsx` block with recorded active, removed and other versions. `HUNTER_MAX_PENDING` applies: a full queue pauses the feed at that page.
 
+## RubyGems
+
+Off by default. When on, Hunter polls `GET /api/v1/timeframe_versions.json` and diffs each new `platform=ruby` version's `.gem` against the previous non-yanked ruby version. The first poll starts the feed at the current time. A checkpoint older than 7 days is clamped to six days ago, because the API rejects a longer span. Rules read library Ruby and install hooks: `eval` of a fetched body, an extension that fetches a URL or pipes `curl` or `wget` into a shell, an `extensions` path outside `ext/**/extconf.rb`, and a `post_install_message` that newly contains `curl`, `wget`, a pipe to `sh`, or `gem install`. One of those sends the release to Triage. Scout reads a release only when a rule hit and `HUNTER_RUBYGEMS_SCOUT` is on. Nothing in the gem is installed or run.
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `HUNTER_RUBYGEMS` | off | `on` watches RubyGems releases. |
+| `HUNTER_RUBYGEMS_URL` | `https://rubygems.org` | Registry origin. |
+| `HUNTER_RUBYGEMS_POLL_INTERVAL` | `60` | Seconds between feed polls (at least 60). |
+| `HUNTER_RUBYGEMS_MAX_PAGES` | `20` | Pages read per poll (at most 100). |
+| `HUNTER_RUBYGEMS_SCOUT` | off | `on` lets Scout read a RubyGems release, only when a rule hit. |
+
+`hunter score --ecosystem rubygems --name NAME --old OLD --new NEW` scores one pair without the poller. Localhost `/health` adds a `rubygems` block with the checkpoint and how many releases the last poll queued. `HUNTER_MAX_PENDING` applies: a full queue pauses the feed on the version that would not fit.
+
 ## Account-takeover signals
 
 Off by default. With `HUNTER_TAKEOVER_SIGNALS=on`, Hunter reads registry metadata for each pending npm and PyPI release before Scout and records account-takeover signals for it. No archive is downloaded and no model is called. The classify queue then takes the highest score first; releases with no signals keep their usual oldest-first order. How the signals work: [detection.md](detection.md#account-takeover-signals).
