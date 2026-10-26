@@ -2265,6 +2265,40 @@ class Database:
             ).fetchall()
         return list(rows)
 
+    def poll_last_error(self, ecosystem: str) -> str | None:
+        """Stored ``poll_status.last_error`` for one feed, or None when there is no error."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT last_error FROM poll_status WHERE ecosystem = ?",
+                (ecosystem,),
+            ).fetchone()
+        if row is None or row["last_error"] is None:
+            return None
+        text = str(row["last_error"]).strip()
+        return text or None
+
+    def mcp_packages_needing_catchup(self, since: str) -> list[tuple[str, str]]:
+        """(ecosystem, name) first seen at or after ``since`` with no package cursor yet.
+
+        A failed catch-up leaves the cursor empty. The next poll passes a ``since``
+        that still covers that insert, so the read is tried again. Names that
+        already have a cursor are left to the npm and PyPI feeds.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT m.ecosystem, m.name
+                FROM mcp_packages AS m
+                LEFT JOIN package_cursor AS c
+                    ON c.ecosystem = m.ecosystem AND c.name = m.name
+                WHERE m.first_seen_at >= ?
+                  AND (c.ecosystem IS NULL OR c.last_time IS NULL)
+                ORDER BY m.ecosystem, m.name
+                """,
+                (since,),
+            ).fetchall()
+        return [(str(row["ecosystem"]), str(row["name"])) for row in rows]
+
     def poll_watch(self, ecosystem: str) -> dict[str, int | None]:
         """Names the npm or PyPI poll queues releases for: the ranked watchlist plus MCP packages.
 

@@ -1340,9 +1340,149 @@ def _ground_truth_safely(
         log.warning("ground truth run failed: %s", exc)
 
 
+def _newest_stamped(pairs: list[tuple[str, str]]) -> tuple[str, str, datetime] | None:
+    """Newest (version, stamp, time). Versions with no parseable time are skipped."""
+    chosen: tuple[str, str, datetime] | None = None
+    for version, stamp in pairs:
+        moment = parse_time(stamp)
+        if moment is None:
+            continue
+        if chosen is None or moment > chosen[2] or (moment == chosen[2] and version > chosen[0]):
+            chosen = (version, stamp, moment)
+    return chosen
+
+
+def _pypi_release_times(project: dict) -> list[tuple[str, str]]:
+    found: list[tuple[str, str]] = []
+    for version, files in (project.get("releases") or {}).items():
+        stamps = []
+        for item in files or []:
+            if not isinstance(item, dict):
+                continue
+            stamp = item.get("upload_time_iso_8601") or item.get("upload_time")
+            if stamp:
+                stamps.append(str(stamp))
+        if stamps:
+            found.append((str(version), min(stamps)))
+    return found
+
+
+def _mcp_catchup_since(previous: str | None, started: datetime) -> str:
+    """How far back this catch-up looks for names that still have no cursor.
+
+    The saved checkpoint is five minutes before the poll that wrote it, so a
+    name inserted then is still included an hour later. A missing or future
+    checkpoint uses this poll's start: new rows match, older rows are not backfilled.
+    """
+    start = iso(started)
+    parsed = parse_time(previous) if previous else None
+    if parsed is None or parsed > started:
+        return start
+    return iso(parsed)
+
+
+def _catch_up_mcp_name(
+    db: Database,
+    config: Config,
+    transport: HttpGet,
+    ecosystem: str,
+    name: str,
+    now: datetime,
+) -> int:
+    """Queue the newest release inside the lookback. Set the cursor only when the read works."""
+    if ecosystem == "npm":
+        document = _json(transport(f"{config.npm_registry.rstrip('/')}/{quote(name)}", 60))
+        pairs = versions_after(document, None)
+    elif ecosystem == "pypi":
+        document = _json(transport(f"{config.pypi_base.rstrip('/')}/{quote(name)}/json", 60))
+        pairs = _pypi_release_times(document)
+    else:
+        return 0
+    newest = _newest_stamped(pairs)
+    queued = 0
+    cutoff = now - timedelta(hours=float(config.mcp_catchup_hours))
+    if newest is not None and newest[2] >= cutoff:
+        state = _release_stored(db, ecosystem, name, newest[0], None, config.max_pending)
+        if state == "refused":
+            return 0
+        if state == "queued":
+            queued = 1
+    if newest is not None:
+        db.set_package_cursor(ecosystem, name, newest[0], newest[1])
+    else:
+        db.set_package_cursor(ecosystem, name, None, iso(now))
+    return queued
+
+
+def catch_up_mcp_packages(
+    db: Database,
+    config: Config,
+    transport: HttpGet,
+    since: str,
+    now: datetime | None = None,
+) -> int:
+    """Queue one recent release for names just inserted. A read error leaves the cursor empty.
+
+    This does not touch the registry checkpoint. One bad packument does not stop the others.
+    """
+    moment = now or utcnow()
+    queued = 0
+    for ecosystem, name in db.mcp_packages_needing_catchup(since):
+        try:
+            queued += _catch_up_mcp_name(db, config, transport, ecosystem, name, moment)
+        except Exception as exc:
+            log.warning("MCP catch-up failed for %s %s: %s", ecosystem, name, exc)
+    return queued
+
+
+def poll_mcp_and_catchup(
+    db: Database,
+    config: Config,
+    transport: HttpGet = http_get,
+    stop: threading.Event | None = None,
+) -> dict:
+    """One registry poll, then catch-up of names that poll inserted. Returns the summary counts."""
+    previous = db.get_checkpoint("mcp")
+    started = utcnow()
+    pages = 0
+
+    def counting(url: str, timeout: float) -> bytes:
+        nonlocal pages
+        if urlsplit(url).path.rstrip("/").endswith("/v0.1/servers"):
+            pages += 1
+        return transport(url, timeout)
+
+    added = poll_mcp_registry(db, config, counting, stop)
+    # Catch-up errors stay here. The registry checkpoint is already saved.
+    try:
+        catch_up_mcp_packages(db, config, transport, _mcp_catchup_since(previous, started), started)
+    except Exception as exc:
+        log.warning("MCP catch-up failed: %s", exc)
+    counts = db.mcp_counts()
+    return {
+        "pages": pages,
+        "added": added,
+        "npm": counts["npm"],
+        "pypi": counts["pypi"],
+        "checkpoint": db.get_checkpoint("mcp"),
+    }
+
+
+def mcp_registry_health(db: Database) -> dict:
+    """Counts plus the checkpoint and the last poll outcome for ``/health``."""
+    counts = db.mcp_counts()
+    return {
+        "npm": counts["npm"],
+        "pypi": counts["pypi"],
+        "checkpoint": db.get_checkpoint("mcp"),
+        "last_success_at": db.last_poll().get("mcp"),
+        "last_error": db.poll_last_error("mcp"),
+    }
+
+
 def _poll_mcp_registry_safely(db: Database, config: Config, transport: HttpGet, stop: threading.Event | None) -> None:
     try:
-        poll_mcp_registry(db, config, transport, stop)
+        poll_mcp_and_catchup(db, config, transport, stop)
     except Exception as exc:
         db.mark_poll_error(MCP_POLL_NAME, str(exc))
         log.warning("MCP registry poll failed: %s", exc)
@@ -1416,11 +1556,15 @@ def _start_feed_polls(
 
 
 def run_cycle(db, config, *, jev, loader, feed, transport: HttpGet = http_get, stop: threading.Event | None = None) -> None:
-    """Poll PyPI and npm together, then drain once.
+    """Poll the MCP registry first when it is on, then PyPI and npm together, then drain once.
 
-    The two polls share one SQLite connection. Database methods take a lock
-    around each statement, and the polls do not hold that lock during HTTP.
+    The registry poll finishes before the feed polls so a name found this cycle
+    is already on the watch. The two feed polls share one SQLite connection.
+    Database methods take a lock around each statement, and the polls do not
+    hold that lock during HTTP.
     """
+    if getattr(config, "mcp_registry", False):
+        _poll_mcp_registry_safely(db, config, transport, stop)
     threads = _start_feed_polls(db, config, feed, transport, stop)
     for thread in threads:
         thread.join()
@@ -1474,7 +1618,7 @@ def health_payload(
             "ecosyste_error": probe.get("error"),
         }
     if config is not None and getattr(config, "mcp_registry", False):
-        payload["mcp_registry"] = db.mcp_counts()
+        payload["mcp_registry"] = mcp_registry_health(db)
     if config is not None and getattr(config, "openvsx", False):
         payload["openvsx"] = db.openvsx_counts()
     if config is not None and getattr(config, "rubygems", False):
