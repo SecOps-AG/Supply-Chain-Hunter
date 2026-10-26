@@ -61,9 +61,14 @@ def extract_tools(files: Mapping[str, str] | None) -> dict[str, Tool]:
     found: dict[str, Tool] = {}
     if not files:
         return found
-    for path, text in _sources(files):
+    sources = list(_sources(files))
+    exported = {path: _exported_strings(text) for path, text in sources if Path(path).suffix.lower() != ".py"}
+    for path, text in sources:
         suffix = Path(path).suffix.lower()
-        tools = _python_tools(text) if suffix == ".py" else _js_tools(text)
+        if suffix == ".py":
+            tools = _python_tools(text)
+        else:
+            tools = _js_tools(text, _imported_strings(text, path, exported))
         for tool in tools:
             current = found.get(tool.name)
             if current is None:
@@ -302,13 +307,158 @@ def _skip_path(path: str) -> bool:
     return False
 
 
-def _js_tools(text: str) -> list[Tool]:
+def _js_tools(text: str, imports: Mapping[str, str] | None = None) -> list[Tool]:
     if "registerTool" not in text and not re.search(r"(?<![\w$])tools\s*:", text):
         return []
     schemas = _zod_schemas(text)
-    found = _register_tools(text, schemas)
-    found.extend(_tools_arrays(text, schemas))
+    strings, objects = _js_bindings(text)
+    found = _register_tools(text, schemas, strings, objects, imports or {})
+    found.extend(_tools_arrays(text, schemas, strings, objects, imports or {}))
     return found
+
+
+def _js_bindings(text: str) -> tuple[dict[str, list[tuple[int, str]]], dict[str, list[tuple[int, int, int]]]]:
+    """Same-file `const`/`let`/`var` string and object bindings. Nothing is evaluated.
+
+    A string binding includes adjacent literals and a template. An object binding
+    is the `{...}` a tool config or a `tools` entry points at.
+    """
+    strings: dict[str, list[tuple[int, str]]] = {}
+    objects: dict[str, list[tuple[int, int, int]]] = {}
+    index = 0
+    while index < len(text):
+        if text.startswith("//", index) or text.startswith("/*", index):
+            index = _skip_comment(text, index)
+            continue
+        if text[index] in "'\"`":
+            _, index = _read_string(text, index)
+            continue
+        parsed = _binding_at(text, index)
+        if parsed is None:
+            index += 1
+            continue
+        name, value_at, value_end = parsed
+        if value_end <= value_at:
+            index += 1
+            continue
+        if _skip_gap(text, value_at) < len(text) and text[_skip_gap(text, value_at)] == "{":
+            objects.setdefault(name, []).append((index, value_at, value_end))
+        else:
+            literal = _js_string(text, value_at, value_end)
+            if literal is not None:
+                strings.setdefault(name, []).append((index, literal))
+        index = value_end
+    return strings, objects
+
+
+def _binding_at(text: str, index: int) -> tuple[str, int, int] | None:
+    cursor = index
+    exported = _keyword(text, cursor, "export")
+    if exported is not None:
+        cursor = _skip_gap(text, exported)
+    kind = None
+    for word in ("const", "let", "var"):
+        kind = _keyword(text, cursor, word)
+        if kind is not None:
+            break
+    if kind is None:
+        return None
+    cursor = _skip_gap(text, kind)
+    name, cursor = _read_ident(text, cursor)
+    if not name:
+        return None
+    cursor = _skip_gap(text, cursor)
+    if cursor >= len(text) or text[cursor] != "=":
+        return None
+    value_at = _skip_gap(text, cursor + 1)
+    value_end = _skip_value(text, value_at)
+    if value_end <= value_at:
+        return None
+    return name, value_at, value_end
+
+
+def _keyword(text: str, index: int, word: str) -> int | None:
+    if index < 0 or index >= len(text):
+        return None
+    if index and (text[index - 1].isalnum() or text[index - 1] in "_$"):
+        return None
+    end = index + len(word)
+    if not text.startswith(word, index):
+        return None
+    if end < len(text) and (text[end].isalnum() or text[end] in "_$"):
+        return None
+    return end
+
+
+def _read_ident(text: str, index: int) -> tuple[str | None, int]:
+    if index >= len(text) or not (text[index].isalpha() or text[index] in "_$"):
+        return None, index
+    end = index + 1
+    while end < len(text) and (text[end].isalnum() or text[end] in "_$"):
+        end += 1
+    return text[index:end], end
+
+
+def _lookup_string(
+    strings: dict[str, list[tuple[int, str]]],
+    imports: Mapping[str, str],
+    name: str,
+    pos: int,
+) -> str | None:
+    found = None
+    for index, value in strings.get(name, ()):
+        if index < pos:
+            found = value
+        else:
+            break
+    if found is not None:
+        return found
+    value = imports.get(name)
+    return value if isinstance(value, str) else None
+
+
+def _lookup_object(
+    objects: dict[str, list[tuple[int, int, int]]],
+    name: str,
+    pos: int,
+) -> tuple[int, int] | None:
+    found = None
+    for index, start, end in objects.get(name, ()):
+        if index < pos:
+            found = (start, end)
+        else:
+            break
+    return found
+
+
+def _ident_span(text: str, start: int, end: int) -> str | None:
+    index = _skip_gap(text, start)
+    if index >= end or not (text[index].isalpha() or text[index] in "_$"):
+        return None
+    name, nxt = _read_ident(text, index)
+    if _skip_gap(text, nxt) < end:
+        return None
+    return name
+
+
+def _field_string(
+    text: str,
+    fields: dict[str, tuple[int, int]],
+    key: str,
+    strings: dict[str, list[tuple[int, str]]],
+    imports: Mapping[str, str],
+    pos: int,
+) -> str:
+    if key not in fields:
+        return ""
+    start, end = fields[key]
+    literal = _js_string(text, start, end)
+    if literal is not None:
+        return literal
+    ident = _ident_span(text, start, end)
+    if not ident:
+        return ""
+    return _lookup_string(strings, imports, ident, pos) or ""
 
 
 def _zod_schemas(text: str) -> dict[str, set[str]]:
@@ -323,21 +473,31 @@ def _zod_schemas(text: str) -> dict[str, set[str]]:
     return schemas
 
 
-def _register_tools(text: str, schemas: dict[str, set[str]]) -> list[Tool]:
+def _register_tools(
+    text: str,
+    schemas: dict[str, set[str]],
+    strings: dict[str, list[tuple[int, str]]],
+    objects: dict[str, list[tuple[int, int, int]]],
+    imports: Mapping[str, str],
+) -> list[Tool]:
     found: list[Tool] = []
     for match in re.finditer(r"(?<![\w$])registerTool\s*\(", text):
         args = _split_args(text, match.end() - 1)
         if len(args) < 2:
             continue
-        name = _js_string(text, args[0][0], args[0][1])
+        literal = _js_string(text, args[0][0], args[0][1])
+        ident = None if literal else _ident_span(text, args[0][0], args[0][1])
+        resolved = literal or (_lookup_string(strings, imports, ident, match.start()) if ident else None)
+        fields = _config_fields(text, args[1][0], args[1][1], objects, match.start())
+        description = _field_string(text, fields, "description", strings, imports, match.start())
+        # A bare unresolved call is not a tool. A resolved name, or any
+        # description, is.
+        if not resolved and not description:
+            continue
+        name = resolved or ident
         if not name:
             continue
-        fields = _fields(text, args[1][0], args[1][1])
-        description = ""
         props: set[str] = set()
-        if "description" in fields:
-            start, end = fields["description"]
-            description = _js_string(text, start, end) or ""
         if "inputSchema" in fields:
             start, end = fields["inputSchema"]
             props = _schema_props(text, start, end, schemas)
@@ -345,7 +505,32 @@ def _register_tools(text: str, schemas: dict[str, set[str]]) -> list[Tool]:
     return found
 
 
-def _tools_arrays(text: str, schemas: dict[str, set[str]]) -> list[Tool]:
+def _config_fields(
+    text: str,
+    start: int,
+    end: int,
+    objects: dict[str, list[tuple[int, int, int]]],
+    pos: int,
+) -> dict[str, tuple[int, int]]:
+    index = _skip_gap(text, start)
+    if index < end and text[index] == "{":
+        return _fields(text, start, end)
+    ident = _ident_span(text, start, end)
+    if not ident:
+        return {}
+    span = _lookup_object(objects, ident, pos)
+    if span is None:
+        return {}
+    return _fields(text, span[0], span[1])
+
+
+def _tools_arrays(
+    text: str,
+    schemas: dict[str, set[str]],
+    strings: dict[str, list[tuple[int, str]]],
+    objects: dict[str, list[tuple[int, int, int]]],
+    imports: Mapping[str, str],
+) -> list[Tool]:
     found: list[Tool] = []
     for match in re.finditer(r"(?<![\w$])tools\s*:", text):
         index = _skip_gap(text, match.end())
@@ -357,23 +542,163 @@ def _tools_arrays(text: str, schemas: dict[str, set[str]]) -> list[Tool]:
             cursor = _skip_gap(text, cursor)
             if cursor >= end or text[cursor] == "]":
                 break
+            if text[cursor] == ",":
+                cursor += 1
+                continue
             if text[cursor] == "{":
                 obj_end = _skip_bracket(text, cursor)
-                fields = _fields(text, cursor, obj_end)
-                name = _js_string(text, *fields["name"]) if "name" in fields else None
-                description = _js_string(text, *fields["description"]) if "description" in fields else ""
-                props: set[str] = set()
-                if "inputSchema" in fields:
-                    props = _schema_props(text, *fields["inputSchema"], schemas)
-                if name:
-                    found.append(Tool(name, description or "", props))
+                tool = _tool_from_fields(text, _fields(text, cursor, obj_end), schemas, strings, imports, match.start())
+                if tool is not None:
+                    found.append(tool)
                 cursor = obj_end
+                continue
+            ident, nxt = _read_ident(text, cursor)
+            if ident:
+                span = _lookup_object(objects, ident, match.start())
+                if span is not None:
+                    tool = _tool_from_fields(
+                        text, _fields(text, span[0], span[1]), schemas, strings, imports, match.start()
+                    )
+                    if tool is not None:
+                        found.append(tool)
+                cursor = nxt
                 continue
             nxt = _skip_value(text, cursor)
             if nxt <= cursor:
                 break
             cursor = nxt
     return found
+
+
+def _tool_from_fields(
+    text: str,
+    fields: dict[str, tuple[int, int]],
+    schemas: dict[str, set[str]],
+    strings: dict[str, list[tuple[int, str]]],
+    imports: Mapping[str, str],
+    pos: int,
+) -> Tool | None:
+    name = _field_string(text, fields, "name", strings, imports, pos)
+    if not name:
+        return None
+    description = _field_string(text, fields, "description", strings, imports, pos)
+    props: set[str] = set()
+    if "inputSchema" in fields:
+        props = _schema_props(text, *fields["inputSchema"], schemas)
+    return Tool(name, description, props)
+
+
+def _exported_strings(text: str) -> dict[str, str]:
+    """`export const name = "..."` values in one file. Used when another file names a tool."""
+    found: dict[str, str] = {}
+    index = 0
+    while index < len(text):
+        if text.startswith("//", index) or text.startswith("/*", index):
+            index = _skip_comment(text, index)
+            continue
+        if text[index] in "'\"`":
+            _, index = _read_string(text, index)
+            continue
+        exported = _keyword(text, index, "export")
+        if exported is None:
+            index += 1
+            continue
+        parsed = _binding_at(text, index)
+        if parsed is None:
+            index = exported
+            continue
+        name, value_at, value_end = parsed
+        literal = _js_string(text, value_at, value_end)
+        if literal is not None:
+            found[name] = literal
+        index = value_end if value_end > index else index + 1
+    return found
+
+
+def _imported_strings(text: str, path: str, exported: Mapping[str, Mapping[str, str]]) -> dict[str, str]:
+    """Local name to string for `import { NAME } from "./sibling.js"`."""
+    found: dict[str, str] = {}
+    index = 0
+    while index < len(text):
+        if text.startswith("//", index) or text.startswith("/*", index):
+            index = _skip_comment(text, index)
+            continue
+        if text[index] in "'\"`":
+            _, index = _read_string(text, index)
+            continue
+        keyword = _keyword(text, index, "import")
+        if keyword is None:
+            index += 1
+            continue
+        cursor = _skip_gap(text, keyword)
+        if cursor >= len(text) or text[cursor] != "{":
+            index = keyword
+            continue
+        cursor += 1
+        names: list[tuple[str, str]] = []
+        while cursor < len(text) and text[cursor] != "}":
+            cursor = _skip_gap(text, cursor)
+            if cursor < len(text) and text[cursor] == "}":
+                break
+            remote, cursor = _read_ident(text, cursor)
+            if not remote:
+                cursor += 1
+                continue
+            cursor = _skip_gap(text, cursor)
+            local = remote
+            renamed = _keyword(text, cursor, "as")
+            if renamed is not None:
+                cursor = _skip_gap(text, renamed)
+                local, cursor = _read_ident(text, cursor)
+                local = local or remote
+            names.append((remote, local))
+            cursor = _skip_gap(text, cursor)
+            if cursor < len(text) and text[cursor] == ",":
+                cursor += 1
+        if cursor < len(text) and text[cursor] == "}":
+            cursor += 1
+        cursor = _skip_gap(text, cursor)
+        source = _keyword(text, cursor, "from")
+        if source is None:
+            index = cursor
+            continue
+        cursor = _skip_gap(text, source)
+        if cursor >= len(text) or text[cursor] not in "'\"`":
+            index = cursor
+            continue
+        spec, cursor = _read_string(text, cursor)
+        target = _resolve_import(path, spec, exported)
+        values = exported.get(target or "", {})
+        for remote, local in names:
+            if remote in values:
+                found[local] = values[remote]
+        index = cursor
+    return found
+
+
+def _resolve_import(path: str, spec: str, exported: Mapping[str, Mapping[str, str]]) -> str | None:
+    if not spec.startswith("."):
+        return None
+    base = path.rsplit("/", 1)[0] if "/" in path else ""
+    parts = [part for part in base.split("/") if part] if base else []
+    for part in spec.split("/"):
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            if parts:
+                parts.pop()
+            continue
+        parts.append(part)
+    candidate = "/".join(parts)
+    suffixes = ("", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx")
+    options = [candidate]
+    if not Path(candidate).suffix:
+        options.extend(candidate + suffix for suffix in suffixes if suffix)
+        options.extend(candidate + "/index" + suffix for suffix in suffixes if suffix)
+    for option in options:
+        if option in exported:
+            return option
+    return None
 
 
 def _schema_props(text: str, start: int, end: int, schemas: dict[str, set[str]]) -> set[str]:
@@ -592,7 +917,7 @@ def _skip_expr(text: str, index: int) -> int:
             stack.append(openers[ch])
         elif stack and ch == stack[-1]:
             stack.pop()
-        elif not stack and ch in ",}])":
+        elif not stack and ch in ",}]);":
             break
         index += 1
     return index
@@ -643,23 +968,62 @@ def _skip_comment(text: str, index: int) -> int:
 
 
 def _python_tools(text: str) -> list[Tool]:
-    """Decorator tools only. `ast` parses the source; it does not run it."""
-    if ".tool" not in text:
+    """Decorator and `Tool(...)` definitions. `ast` parses the source; it does not run it."""
+    if ".tool" not in text and "Tool(" not in text:
         return []
     try:
         tree = ast.parse(text)
     except SyntaxError:
         return []
     enums = _enums(tree)
+    models = _models(tree)
     found: list[Tool] = []
     for node in ast.walk(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for deco in node.decorator_list:
+                tool = _decorator_tool(deco, enums, node)
+                if tool is not None:
+                    found.append(tool)
             continue
-        for deco in node.decorator_list:
-            tool = _decorator_tool(deco, enums)
+        if isinstance(node, ast.Call):
+            tool = _constructed_tool(node, enums, models)
             if tool is not None:
                 found.append(tool)
     return found
+
+
+def _models(tree: ast.AST) -> dict[str, set[str]]:
+    """Pydantic model name to field names. Used when a tool points at `Model.model_json_schema()`."""
+    found: dict[str, set[str]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef) or not _model_class(node):
+            continue
+        props = _model_fields(node)
+        if props:
+            found[node.name] = props
+    return found
+
+
+def _model_fields(node: ast.ClassDef) -> set[str]:
+    """Field names, including annotations with no default."""
+    props: set[str] = set()
+    for item in node.body:
+        if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
+            if item.target.id != "model_config":
+                props.add(item.target.id.lower())
+            continue
+        target, _value = _assign(item)
+        if target and target != "model_config":
+            props.add(target.lower())
+    return props
+
+
+def _model_class(node: ast.ClassDef) -> bool:
+    for base in node.bases:
+        name = _dotted(base)
+        if name == "BaseModel" or name.endswith(".BaseModel"):
+            return True
+    return False
 
 
 def _enums(tree: ast.AST) -> dict[str, str]:
@@ -693,21 +1057,64 @@ def _assign(node: ast.AST) -> tuple[str | None, ast.AST | None]:
     return None, None
 
 
-def _decorator_tool(node: ast.AST, enums: dict[str, str]) -> Tool | None:
-    if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+def _decorator_tool(node: ast.AST, enums: dict[str, str], fn: ast.AST) -> Tool | None:
+    if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
         return None
-    if node.func.attr != "tool":
+    bare = isinstance(node, ast.Attribute) and node.attr == "tool"
+    called = (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "tool"
+    )
+    if not bare and not called:
         return None
     name = None
     description = ""
-    for keyword in node.keywords:
+    for keyword in getattr(node, "keywords", ()):
         if keyword.arg == "name":
             name = _resolve(keyword.value, enums)
         elif keyword.arg == "description":
             description = _literal(keyword.value) or ""
     if not name:
+        name = fn.name
+    if not description:
+        description = ast.get_docstring(fn) or ""
+    params = (*fn.args.posonlyargs, *fn.args.args, *fn.args.kwonlyargs)
+    props = {arg.arg.lower() for arg in params if arg.arg not in {"self", "cls"}}
+    return Tool(name, description, props)
+
+
+def _constructed_tool(node: ast.Call, enums: dict[str, str], models: dict[str, set[str]]) -> Tool | None:
+    func = node.func
+    if isinstance(func, ast.Name):
+        if func.id != "Tool":
+            return None
+    elif isinstance(func, ast.Attribute):
+        if func.attr != "Tool":
+            return None
+    else:
         return None
-    return Tool(name, description, set())
+    name = None
+    description = ""
+    props: set[str] = set()
+    for keyword in node.keywords:
+        if keyword.arg == "name":
+            name = _resolve(keyword.value, enums)
+        elif keyword.arg == "description":
+            description = _literal(keyword.value) or ""
+        elif keyword.arg == "inputSchema":
+            props = _schema_call_props(keyword.value, models)
+    if not name:
+        return None
+    return Tool(name, description, props)
+
+
+def _schema_call_props(node: ast.AST, models: dict[str, set[str]]) -> set[str]:
+    if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+        return set()
+    if node.func.attr != "model_json_schema" or not isinstance(node.func.value, ast.Name):
+        return set()
+    return set(models.get(node.func.value.id, ()))
 
 
 def _resolve(node: ast.AST, enums: dict[str, str]) -> str | None:
@@ -716,6 +1123,8 @@ def _resolve(node: ast.AST, enums: dict[str, str]) -> str | None:
         return literal
     if isinstance(node, ast.Attribute) and node.attr == "value":
         return enums.get(_dotted(node.value))
+    if isinstance(node, ast.Attribute):
+        return enums.get(_dotted(node))
     return None
 
 
