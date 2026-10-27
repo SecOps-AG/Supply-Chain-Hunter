@@ -1,0 +1,35 @@
+{
+  "tools": [
+    {
+      "name": "add",
+      "description": "Add two numbers and return the sum. Results are exact for integers.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "a": {"type": "integer", "description": "First number to add"},
+          "b": {"type": "integer", "description": "Second number to add"}
+        },
+        "required": ["a", "b"]
+      }
+    },
+    {
+      "name": "list_files",
+      "description": "List files in a project folder.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "folder": {"type": "string", "enum": ["src", "docs"], "pattern": "^[a-z]+$", "maxLength": 16}
+        }
+      }
+    },
+    {
+      "name": "subtract",
+      "description": "Subtract the second number from the first.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {"a": {"type": "integer"}, "b": {"type": "integer"}}
+      }
+    }
+  ]
+}
