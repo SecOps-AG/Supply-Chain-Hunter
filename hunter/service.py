@@ -89,7 +89,7 @@ from hunter.registry import (
     versions_after,
 )
 from hunter.mcp_risk import score_pending_jobs as score_mcp_jobs
-from hunter.takeover import score_pending_jobs
+from hunter.takeover import ECOSYSTEMS as TAKEOVER_ECOSYSTEMS, score_pending_jobs
 from hunter.typosquat import TYPOSQUAT_QUEUE_LIMIT, NameIndex, typosquat_pairs
 from hunter.registry import parse_time
 from hunter.public_feed import publish_public_feed
@@ -932,10 +932,13 @@ def drain_jobs(
     limit: int | None = None,
 ) -> int:
     batch = config.classify_batch if limit is None else limit
+    takeover_on = bool(getattr(config, "takeover_signals", False))
     jobs = db.pending_jobs(
         limit=max(0, batch),
-        prioritize=getattr(config, "takeover_signals", False),
+        prioritize=takeover_on,
         prioritize_mcp=getattr(config, "mcp_risk", False),
+        hold_ecosystems=TAKEOVER_ECOSYSTEMS if takeover_on else (),
+        hold_since=utcnow() - TAKEOVER_WAIT if takeover_on else None,
     )
     if not jobs:
         return 0
@@ -988,6 +991,9 @@ def _score_takeover_safely(
 
 
 TAKEOVER_IDLE_S = 5.0
+# Classify leaves a new npm or PyPI job alone this long while the takeover
+# thread scores it, so it is not taken at score 0. After that it runs anyway.
+TAKEOVER_WAIT = timedelta(seconds=60)
 
 
 def _takeover_loop(db: Database, config: Config, transport: HttpGet, stop: threading.Event) -> None:

@@ -555,7 +555,7 @@ def test_scored_at_column_added_to_existing_db(tmp_path):
         """
     )
     conn.execute(
-        "INSERT INTO releases VALUES ('npm', 'old', '1.0.0', 'review', 0.9, 'none', NULL, '{}', ?)",
+        "INSERT INTO releases VALUES ('npm', 'old', '1.0.0', 'deferred', 0.9, 'none', NULL, '{}', ?)",
         (iso(NOW),),
     )
     conn.commit()
@@ -734,3 +734,17 @@ def test_openvsx_labels_stay_out_of_recall_and_survive_a_later_active(tmp_path):
     assert retirement["labels"] == [
         {"platform": "universal", "state": "removed", "changed_at": "2026-10-01T02:00:00Z"}
     ]
+
+
+def test_band_change_inside_caught_bands_keeps_first_catch_time(tmp_path):
+    config = make_config(tmp_path)
+    db = Database(config.db_path)
+    try:
+        save(db, "npm", "esc", "1.0.0", "review", NOW - timedelta(hours=5))
+        db.save_release("npm", "esc", "1.0.0", "alert", 0.95, "none", None, "{}", when=NOW - timedelta(hours=1), replace=True)
+        db.save_release("npm", "esc", "1.0.0", "review", 0.8, "none", None, "{}", when=NOW, replace=True)
+        [row] = db.ground_truth_releases("")
+    finally:
+        db.close()
+    # review -> alert -> review is one catch; time-to-detect counts from the first.
+    assert row["scored_at"] == iso(NOW - timedelta(hours=5))
