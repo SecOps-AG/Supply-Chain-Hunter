@@ -69,15 +69,16 @@ def dl_template(config, transport: HttpGet) -> str:
     if key in _templates:
         return _templates[key]
     fallback = f"{config.crates_static.rstrip('/')}/crates/{{crate}}/{{crate}}-{{version}}.crate"
-    template = ""
     try:
         data = json.loads(_json_bytes(transport(f"{key}/config.json", 60)).decode("utf-8"))
         if isinstance(data, dict):
             template = str(data.get("dl") or "")
+            if template:
+                _templates[key] = template
+                return template
     except Exception:
         log.warning("crates index config.json unavailable; using the static download URL")
-    _templates[key] = template or fallback
-    return _templates[key]
+    return fallback
 
 
 def fetch_index(config, name: str, transport: HttpGet) -> list[dict]:
