@@ -147,6 +147,14 @@ def test_watched_only_keeps_listed_packages(db):
     assert len(dashboard.findings(db, {"range": "24h", "scope": "flagged"})["rows"]) == 3
 
 
+def test_watched_only_still_counts_decision_model_outage_notices(db):
+    db.replace_user_watch_source("repo/requirements.txt", "requirements", [("pypi", "demo-client", "0.3.0", None)])
+    db.enqueue("decision-model-down:2026-10-27T00:00:00Z", "{}")
+    snap = dashboard.snapshot(db, health={}, models=None, range_name="24h", watched_only=True, watch_mode="watched", alert_scope="watched")
+    assert snap["webhook"]["outage_notices"] == 1
+    assert snap["webhook"]["alerts_total"] == 0
+
+
 def test_release_carries_the_watch_block_only_when_listed(db):
     assert "watch" not in dashboard.release(db, "pypi", "demo-client", "0.3.0")["release"]
     db.replace_user_watch_source("repo/requirements.txt", "requirements", [("pypi", "demo-client", "0.3.0", None)])

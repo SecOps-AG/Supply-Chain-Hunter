@@ -171,10 +171,17 @@ def _join(flagged: list[dict], triage: list[dict], analyst: list[dict], outbox: 
 
 
 def _listed_rows(rows: list[dict], listed: set[tuple[str, str]]) -> list[dict]:
-    """Rows whose ``eco:name:version`` key names a package on the user watchlist."""
+    """Rows whose ``eco:name:version`` key names a package on the user watchlist.
+
+    Decision-model outage notices name no package and are kept.
+    """
     kept = []
     for row in rows:
-        ecosystem, _sep, rest = str(row.get("idempotency_key") or "").partition(":")
+        key = str(row.get("idempotency_key") or "")
+        if key.startswith("decision-model-down:"):
+            kept.append(row)
+            continue
+        ecosystem, _sep, rest = key.partition(":")
         name, _sep, _version = rest.partition(":")
         if (ecosystem, name) in listed:
             kept.append(row)
