@@ -575,8 +575,11 @@ class Database:
                 family = excluded.family,
                 subtype = excluded.subtype,
                 payload_json = excluded.payload_json,
-                scored_at = CASE WHEN releases.band IS excluded.band
-                    THEN releases.scored_at ELSE excluded.scored_at END
+                scored_at = CASE
+                    WHEN releases.band IS excluded.band THEN releases.scored_at
+                    WHEN releases.band IN ('review', 'alert') AND excluded.band IN ('review', 'alert')
+                        THEN releases.scored_at
+                    ELSE excluded.scored_at END
             """
             if replace
             else "ON CONFLICT(ecosystem, name, version) DO NOTHING"
@@ -753,28 +756,39 @@ class Database:
         *,
         prioritize: bool = False,
         prioritize_mcp: bool = False,
+        hold_ecosystems: tuple[str, ...] = (),
+        hold_since: datetime | None = None,
     ) -> list[sqlite3.Row]:
         """Oldest first.
 
         `prioritize` puts a higher account-takeover score first.
         `prioritize_mcp` orders by the takeover score plus the MCP risk score.
         When `prioritize_mcp` is false, the SQL is unchanged.
+        With `hold_since`, a prioritized query skips jobs in `hold_ecosystems`
+        that have no takeover-signal row yet and were queued after `hold_since`,
+        so a new release is not taken at score 0 before its signals exist.
         """
+        hold_sql = ""
+        hold_args: tuple = ()
+        if hold_since is not None and hold_ecosystems:
+            marks = ",".join("?" for _ in hold_ecosystems)
+            hold_sql = f" AND NOT (t.name IS NULL AND j.ecosystem IN ({marks}) AND j.created_at > ?)"
+            hold_args = (*hold_ecosystems, iso(hold_since))
         if prioritize_mcp:
             with self._lock:
                 rows = self._conn.execute(
-                    """
+                    f"""
                     SELECT j.ecosystem, j.name, j.version, j.rank FROM release_jobs AS j
                     LEFT JOIN takeover_signals AS t
                         ON t.ecosystem = j.ecosystem AND t.name = j.name AND t.version = j.version
                     LEFT JOIN mcp_risk AS m
                         ON m.ecosystem = j.ecosystem AND m.name = j.name AND m.version = j.version
-                    WHERE j.status = 'pending'
+                    WHERE j.status = 'pending'{hold_sql}
                     ORDER BY (COALESCE(t.score, 0) + COALESCE(m.score, 0)) DESC,
                         j.created_at, j.ecosystem, j.name, j.version
                     LIMIT ?
                     """,
-                    (limit,),
+                    (*hold_args, limit),
                 ).fetchall()
             return list(rows)
         if not prioritize:
@@ -791,15 +805,15 @@ class Database:
             return list(rows)
         with self._lock:
             rows = self._conn.execute(
-                """
+                f"""
                 SELECT j.ecosystem, j.name, j.version, j.rank FROM release_jobs AS j
                 LEFT JOIN takeover_signals AS t
                     ON t.ecosystem = j.ecosystem AND t.name = j.name AND t.version = j.version
-                WHERE j.status = 'pending'
+                WHERE j.status = 'pending'{hold_sql}
                 ORDER BY COALESCE(t.score, 0) DESC, j.created_at, j.ecosystem, j.name, j.version
                 LIMIT ?
                 """,
-                (limit,),
+                (*hold_args, limit),
             ).fetchall()
         return list(rows)
 
@@ -1892,7 +1906,8 @@ class Database:
     def ground_truth_releases(self, since: str) -> list[dict]:
         """npm, PyPI, and Open VSX releases first saved at or after `since`, with the confirmed public-alert time if any.
 
-        `scored_at` is when the band last changed (a deferred release re-scored later),
+        `scored_at` is when the release was first caught (review or alert), or when the band last
+        changed outside the caught bands (a deferred release re-scored later),
         or the first save for rows written before that column existed.
         """
         with self._lock:

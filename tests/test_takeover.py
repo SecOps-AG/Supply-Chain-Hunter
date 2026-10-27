@@ -307,6 +307,7 @@ def test_drain_jobs_takes_the_highest_score_first_only_when_enabled(tmp_path, mo
     db.enqueue_job("npm", "calm", "1.0.1", 1)
     db.enqueue_job("npm", "widget", "1.0.1", 2)
     db.save_takeover_signals("npm", "widget", "1.0.1", 40, ["provenance_lost"], {})
+    db.save_takeover_signals("npm", "calm", "1.0.1", 0, [], {})
     seen: list[str] = []
 
     def fake_classify(_db, _config, job, **_kwargs):
@@ -485,3 +486,39 @@ def test_serve_scores_on_its_own_thread_not_in_the_classify_round(tmp_path, monk
     assert called == []
     drain_until_idle(db, config, jev=None, loader=None)
     assert len(called) == 1
+
+
+def test_classify_waits_briefly_for_takeover_signals_on_new_releases(tmp_path, monkeypatch):
+    db = Database(tmp_path / "h.sqlite3")
+    now = datetime.now(timezone.utc)
+    db.enqueue_job("npm", "old", "1.0.0", 1, when=now - timedelta(hours=1))
+    db.save_takeover_signals("npm", "old", "1.0.0", 0, [], {})
+    db.enqueue_job("npm", "fresh", "1.0.0", 2, when=now)
+    db.enqueue_job("crates", "other", "1.0.0", 3, when=now)  # takeover never scores crates
+    seen: list[str] = []
+
+    def fake_classify(_db, _config, job, **_kwargs):
+        seen.append(str(job["name"]))
+        _db.finish_job(job["ecosystem"], job["name"], job["version"])
+
+    monkeypatch.setattr("hunter.service.classify_job", fake_classify)
+    drain_jobs(db, _config(tmp_path, classify_batch=10), jev=None, loader=object(), workers=1)
+    # The fresh npm release is not classified at score 0 before its signals exist.
+    assert seen == ["old", "other"]
+    db.save_takeover_signals("npm", "fresh", "1.0.0", 40, ["provenance_lost"], {})
+    drain_jobs(db, _config(tmp_path, classify_batch=10), jev=None, loader=object(), workers=1)
+    assert seen == ["old", "other", "fresh"]
+
+
+def test_classify_stops_waiting_for_takeover_signals_after_the_grace(tmp_path, monkeypatch):
+    db = Database(tmp_path / "h.sqlite3")
+    db.enqueue_job("npm", "stale", "1.0.0", 1, when=datetime.now(timezone.utc) - timedelta(minutes=10))
+    seen: list[str] = []
+
+    def fake_classify(_db, _config, job, **_kwargs):
+        seen.append(str(job["name"]))
+        _db.finish_job(job["ecosystem"], job["name"], job["version"])
+
+    monkeypatch.setattr("hunter.service.classify_job", fake_classify)
+    drain_jobs(db, _config(tmp_path), jev=None, loader=object(), workers=1)
+    assert seen == ["stale"]
