@@ -7,6 +7,7 @@ from datetime import timedelta
 from hunter.actions import ECOSYSTEM as ACTIONS_ECOSYSTEM
 from hunter.actions import is_sha, split_version
 from hunter.db import Database, utcnow
+from hunter.inventory import CASE_FOLDED
 from hunter.registry import parse_time
 
 STALE_AFTER = timedelta(days=7)
@@ -19,7 +20,7 @@ def alert_in_scope(db: Database, config, ecosystem: str, name: str) -> bool:
     """True when the webhook may send for this package. Scope ``all`` always sends."""
     if getattr(config, "alert_scope", "all") != "watched":
         return True
-    return name in db.user_watch_names(ecosystem)
+    return (name.lower() if ecosystem in CASE_FOLDED else name) in db.user_watch_names(ecosystem)
 
 
 def is_stale(stamp: str | None, now=None) -> bool:
@@ -34,7 +35,7 @@ def watch_context(db: Database, ecosystem: str, name: str, version: str, now=Non
     that starts with that sha is an exact match. A listed ref equal to the tag is
     also a match (``tag_ref``): the workflow's tag pointed at this commit.
     """
-    entries = db.user_watch_entries(ecosystem, name)
+    entries = db.user_watch_entries(ecosystem, name.lower() if ecosystem in CASE_FOLDED else name)
     if not entries:
         return None
     pinned: list[str] = []

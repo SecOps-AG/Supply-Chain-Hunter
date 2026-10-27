@@ -126,7 +126,7 @@ The packages your environment uses, imported with `hunter watchlist import`. See
 
 | Variable | Default | What it does |
 | --- | --- | --- |
-| `HUNTER_WATCH_MODE` | `all` | `all`: the popular lists plus your watchlist (with no watchlist this is the same as before). `watched`: only your watchlist. The npm, PyPI, GitHub Actions and Open VSX polls queue only listed names, the popular lists are not downloaded, no lookalike names are checked, MCP registry names are left out, and the RubyGems and crates.io polls do not start. Any other value stops startup. |
+| `HUNTER_WATCH_MODE` | `all` | `all`: the popular lists plus your watchlist (with no watchlist this is the same as before). `watched`: only your watchlist. The npm, PyPI, GitHub Actions, Open VSX, RubyGems and crates.io polls queue only listed names (RubyGems and crates.io still need `HUNTER_RUBYGEMS=on` and `HUNTER_CRATES=on`, and still read their feeds), the popular lists are not downloaded, no lookalike names are checked, and MCP registry names are left out. Any other value stops startup. |
 | `HUNTER_ALERT_SCOPE` | `watched` when the mode is `watched`, else `all` | `watched`: the webhook sends only for listed names. A confirmed release that is not listed is still stored, logged and shown on the local dashboard. The decision-model outage webhook is never scoped. Any other value stops startup. |
 | `HUNTER_WATCHLIST_PATHS` | | Comma-separated files or directories. They are imported again every `HUNTER_WATCHLIST_REFRESH` seconds, each labeled with the path as written here. A file that disappears from a directory drops its rows on the next refresh. |
 | `HUNTER_WATCHLIST_MAX_FILE_MB` | `20` | Largest file read during an import. Larger files are skipped and reported. |
@@ -218,7 +218,7 @@ Off by default. When on, Hunter polls `GET /api/v1/timeframe_versions.json` and 
 
 | Variable | Default | What it does |
 | --- | --- | --- |
-| `HUNTER_RUBYGEMS` | off | `on` watches RubyGems releases. |
+| `HUNTER_RUBYGEMS` | off | `on` watches RubyGems releases. With `HUNTER_WATCH_MODE=watched`, only listed gems are queued. |
 | `HUNTER_RUBYGEMS_URL` | `https://rubygems.org` | Registry origin. |
 | `HUNTER_RUBYGEMS_POLL_INTERVAL` | `60` | Seconds between feed polls (at least 60). |
 | `HUNTER_RUBYGEMS_MAX_PAGES` | `20` | Pages read per poll (at most 100). |
@@ -228,7 +228,7 @@ Off by default. When on, Hunter polls `GET /api/v1/timeframe_versions.json` and 
 
 ## crates.io
 
-Off by default. When on, Hunter polls the crates.io RSS feeds (`updates.xml` for versions, `crates.xml` for new names) about once a minute. The first poll stores the newest `pubDate` and queues nothing. Later polls queue versions newer than that checkpoint. A `.crate` file is a gzipped tar. Hunter diffs it against the previous non-yanked index line and runs the Rust rules. It does not run `cargo`, `rustc`, or `build.rs`. Scout reads a release only when a weak rule hit and `HUNTER_CRATES_SCOUT` is on. A weak hit, a typosquat, or two medium signals (a changed `build.rs`, a new proc-macro, a new binary `include_bytes!`, a new git or URL dependency) sends the release to Triage. The default is the full feed. `HUNTER_CRATES_WATCHED_ONLY=on` queues only watched crates and up to 25 name lookalikes per poll.
+Off by default. When on, Hunter polls the crates.io RSS feeds (`updates.xml` for versions, `crates.xml` for new names) about once a minute. The first poll stores the newest `pubDate` and queues nothing. Later polls queue versions newer than that checkpoint. A `.crate` file is a gzipped tar. Hunter diffs it against the previous non-yanked index line and runs the Rust rules. It does not run `cargo`, `rustc`, or `build.rs`. Scout reads a release only when a weak rule hit and `HUNTER_CRATES_SCOUT` is on. A weak hit, a typosquat, or two medium signals (a changed `build.rs`, a new proc-macro, a new binary `include_bytes!`, a new git or URL dependency) sends the release to Triage. The default is the full feed. `HUNTER_CRATES_WATCHED_ONLY=on` queues only watched crates and up to 25 name lookalikes per poll. Names on your own watchlist are queued as well. With `HUNTER_WATCH_MODE=watched` only your names are queued and no lookalikes are checked.
 
 | Variable | Default | What it does |
 | --- | --- | --- |

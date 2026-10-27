@@ -29,6 +29,8 @@ FORMATS = (
     "requirements",
     "toml-lock",
     "pipfile-lock",
+    "gemfile-lock",
+    "cargo-lock",
     "cyclonedx",
     "spdx",
     "plain",
@@ -42,6 +44,8 @@ FORMAT_HELP = {
     "requirements": "requirements*.txt; only == and === pins keep a version",
     "toml-lock": "poetry.lock and uv.lock",
     "pipfile-lock": "Pipfile.lock",
+    "gemfile-lock": "Gemfile.lock (gems from rubygems.org; git, path and other sources are skipped)",
+    "cargo-lock": "Cargo.lock (crates from crates.io; git, path and other registries are skipped)",
     "cyclonedx": "CycloneDX JSON SBOM (component purls)",
     "spdx": "SPDX JSON SBOM (purl external references)",
     "plain": "one package per line: '<eco> <name> [version]', '<eco>:<name>[@version]' or a pkg: purl",
@@ -67,6 +71,16 @@ _TOML_PACKAGE = re.compile(r"^\[\[package\]\]\s*$", re.MULTILINE)
 _PNPM_LOCK = re.compile(r"^lockfileVersion\s*:", re.MULTILINE)
 _YARN_BERRY = re.compile(r"^__metadata:\s*$", re.MULTILINE)
 _COMMENT = re.compile(r"(^|\s)#.*$")
+_GEM_SECTION = re.compile(r"^[A-Z][A-Z ]*$")
+_GEM_SPEC = re.compile(r"^ {4}(\S+) \(([^)\s]+)\)\s*$")
+_GEM_DEPENDENCY = re.compile(r"^ {2}(\S+?)!?(?: \(.*\))?\s*$")
+_GEMFILE_LOCK = re.compile(r"^GEM\s*$[\s\S]*?^ {2}specs:\s*$", re.MULTILINE)
+_CARGO_REGISTRY_SOURCES = ("registry+", "sparse+")
+_CARGO_SOURCES = (*_CARGO_REGISTRY_SOURCES, "git+")
+_CRATES_SOURCES = (
+    "registry+https://github.com/rust-lang/crates.io-index",
+    "sparse+https://index.crates.io",
+)
 
 
 class FormatError(ValueError):
@@ -459,6 +473,103 @@ def parse_pipfile_lock(text: str) -> ParseResult:
 # --- SBOMs -------------------------------------------------------------------
 
 
+def _gem_remote_is_rubygems(remote: str) -> bool:
+    host = remote.split("://", 1)[-1].split("/", 1)[0].lower()
+    return host == "rubygems.org"
+
+
+def parse_gemfile_lock(text: str) -> ParseResult:
+    """Gems listed under ``GEM`` sections whose remote is rubygems.org.
+
+    ``GIT``, ``PATH`` and ``PLUGIN SOURCE`` sections and other gem servers are skipped.
+    A platform build keeps its suffix, as in ``1.13.9-x86_64-linux``. A gem named in
+    ``DEPENDENCIES`` is direct.
+    """
+    out = _Collector("gemfile-lock")
+    section = ""
+    remote = ""
+    in_specs = False
+    versions: list[tuple[str, str]] = []
+    direct: set[str] = set()
+    keep = False
+
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        if not line[0].isspace():
+            section = line.strip()
+            in_specs = False
+            remote = ""
+            keep = False
+            continue
+        if section == "DEPENDENCIES":
+            match = _GEM_DEPENDENCY.match(line)
+            if match:
+                direct.add(match.group(1).lower())
+            continue
+        if section not in {"GEM", "GIT", "PATH", "PLUGIN SOURCE"}:
+            continue
+        stripped = line.strip()
+        if stripped.startswith("remote:"):
+            remote = stripped[len("remote:") :].strip()
+            keep = section == "GEM" and _gem_remote_is_rubygems(remote)
+            continue
+        if stripped == "specs:":
+            in_specs = True
+            continue
+        if not in_specs:
+            continue
+        match = _GEM_SPEC.match(line)
+        if match is None:
+            continue
+        if keep:
+            versions.append((match.group(1), match.group(2)))
+        else:
+            out.skip()
+    for name, version in versions:
+        found = component("rubygems", name, version, None)
+        if found is not None:
+            found = Component(found.ecosystem, found.name, found.version, 1 if found.name in direct else 0)
+        out.add(found)
+    return out.result
+
+
+def parse_cargo_lock(text: str) -> ParseResult:
+    """Crates from the crates.io registry. Path, git and other-registry packages are skipped."""
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise FormatError("lock file is not valid TOML") from exc
+    packages = data.get("package")
+    if not isinstance(packages, list):
+        raise FormatError("TOML lock file has no [[package]] array")
+    out = _Collector("cargo-lock")
+    for entry in packages:
+        source = entry.get("source") if isinstance(entry, dict) else None
+        if not isinstance(source, str) or not source.startswith(_CARGO_REGISTRY_SOURCES):
+            out.skip()
+            continue
+        if source.rstrip("/") not in _CRATES_SOURCES:
+            out.skip()
+            continue
+        out.add(component("crates", str(entry.get("name") or ""), str(entry.get("version") or ""), None))
+    return out.result
+
+
+def _cargo_toml(text: str) -> bool:
+    """True when parsed TOML packages look like Cargo.lock rather than poetry.lock or uv.lock."""
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        return False
+    packages = data.get("package")
+    if not isinstance(packages, list):
+        return False
+    if "requires-python" in data or (isinstance(data.get("metadata"), dict) and "lock-version" in data["metadata"]):
+        return False
+    return any(isinstance(item, dict) and str(item.get("source") or "").startswith(_CARGO_SOURCES) for item in packages)
+
+
 def parse_cyclonedx(text: str) -> ParseResult:
     data = _strict_json(text, "cyclonedx")
     out = _Collector("cyclonedx")
@@ -557,7 +668,7 @@ def parse_plain(text: str) -> ParseResult:
         word, name, version = shape
         ecosystem = ecosystem_alias(word)
         if ecosystem is None:
-            out.warn(f"unknown ecosystem {word[:40]!r}; use npm, pypi, github-actions or openvsx")
+            out.warn(f"unknown ecosystem {word[:40]!r}; use npm, pypi, github-actions, openvsx, rubygems or crates")
             out.skip()
             continue
         out.add(component(ecosystem, name, version, 1))
@@ -589,6 +700,8 @@ PARSERS = {
     "requirements": parse_requirements,
     "toml-lock": parse_toml_lock,
     "pipfile-lock": parse_pipfile_lock,
+    "gemfile-lock": parse_gemfile_lock,
+    "cargo-lock": parse_cargo_lock,
     "cyclonedx": parse_cyclonedx,
     "spdx": parse_spdx,
     "plain": parse_plain,
@@ -613,6 +726,10 @@ def _format_from_name(filename: str) -> str | None:
         return "toml-lock"
     if name == "pipfile.lock":
         return "pipfile-lock"
+    if name == "gemfile.lock":
+        return "gemfile-lock"
+    if name == "cargo.lock":
+        return "cargo-lock"
     if name in {"action.yml", "action.yaml"} or (
         name.endswith((".yml", ".yaml")) and path.parent.as_posix().lower().endswith(".github/workflows")
     ):
@@ -639,7 +756,11 @@ def detect_format(text: str, filename: str = "") -> str | None:
     head = "\n".join(text.splitlines()[:5])
     if "# yarn lockfile v1" in head or _YARN_BERRY.search(text):
         return "yarn-lock"
+    if _GEMFILE_LOCK.search(text) or _format_from_name(filename) == "gemfile-lock":
+        return "gemfile-lock"
     if _TOML_PACKAGE.search(text):
+        if _format_from_name(filename) == "cargo-lock" or _cargo_toml(text):
+            return "cargo-lock"
         try:
             if isinstance(tomllib.loads(text).get("package"), list):
                 return "toml-lock"

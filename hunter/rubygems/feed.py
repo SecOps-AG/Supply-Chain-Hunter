@@ -99,6 +99,8 @@ def poll_rubygems(db: Database, config, transport: HttpGet = http_get, stop: thr
 
     Returns how many releases were queued. A version the pending cap refused is
     read again on the next poll; the checkpoint stays on the last stored row.
+    In watched mode only names on the user watchlist are queued; the checkpoint
+    still moves past the rest.
     """
     saved = db.get_checkpoint(CHECKPOINT)
     now = utcnow()
@@ -122,6 +124,7 @@ def poll_rubygems(db: Database, config, transport: HttpGet = http_get, stop: thr
         )
     end_text = _stamp(now)
     queued = 0
+    listed = db.user_watch_names(ECOSYSTEM) if getattr(config, "watch_mode", "all") == "watched" else None
     pages = max(1, int(getattr(config, "rubygems_max_pages", 20)))
     for page in range(1, pages + 1):
         if stop is not None and stop.is_set():
@@ -132,6 +135,8 @@ def poll_rubygems(db: Database, config, transport: HttpGet = http_get, stop: thr
         refused = False
         for row in sorted((item for item in rows if isinstance(item, dict)), key=_sort_key):
             kept = _consider(row)
+            if kept is not None and listed is not None and kept[0].lower() not in listed:
+                kept = None
             if kept is None:
                 stamp = _row_stamp(row)
                 if stamp:

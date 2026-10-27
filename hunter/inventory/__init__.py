@@ -6,7 +6,8 @@ grouped by the label of the file they came from (the "source").
 
 Names are stored the way the polls compare them: PyPI through
 ``normalize_pypi_name``, npm exactly as written, GitHub Actions as lower case
-``owner/repo`` and Open VSX as lower case ``publisher.extension``.
+``owner/repo``, Open VSX as lower case ``publisher.extension``, and RubyGems and
+crates.io as lower case names (both registries treat case as insignificant).
 """
 
 from __future__ import annotations
@@ -19,8 +20,15 @@ from hunter.actions import normalize_name as normalize_action_name
 from hunter.openvsx import ECOSYSTEM as OPENVSX_ECOSYSTEM
 from hunter.openvsx import release_name
 from hunter.registry import normalize_pypi_name
+from hunter.crates import ECOSYSTEM as CRATES_ECOSYSTEM
+from hunter.crates import safe_segment as crate_segment
+from hunter.rubygems import ECOSYSTEM as RUBYGEMS_ECOSYSTEM
+from hunter.rubygems import valid_name as valid_gem_name
 
-ECOSYSTEMS = ("npm", "pypi", ACTIONS_ECOSYSTEM, OPENVSX_ECOSYSTEM)
+ECOSYSTEMS = ("npm", "pypi", ACTIONS_ECOSYSTEM, OPENVSX_ECOSYSTEM, RUBYGEMS_ECOSYSTEM, CRATES_ECOSYSTEM)
+
+# Ecosystems whose names are stored lower case, whatever case the registry publishes them in.
+CASE_FOLDED = (RUBYGEMS_ECOSYSTEM, CRATES_ECOSYSTEM)
 
 # Names typed in a plain list or on the command line.
 ECOSYSTEM_ALIASES = {
@@ -32,6 +40,10 @@ ECOSYSTEM_ALIASES = {
     "gha": ACTIONS_ECOSYSTEM,
     "openvsx": OPENVSX_ECOSYSTEM,
     "vscode": OPENVSX_ECOSYSTEM,
+    "rubygems": RUBYGEMS_ECOSYSTEM,
+    "gem": RUBYGEMS_ECOSYSTEM,
+    "crates": CRATES_ECOSYSTEM,
+    "cargo": CRATES_ECOSYSTEM,
 }
 
 _NPM_NAME = re.compile(r"^(?:@[a-z0-9~][a-z0-9._~-]*/)?[a-z0-9~][a-z0-9._~-]*$", re.IGNORECASE)
@@ -65,6 +77,10 @@ def normalize(ecosystem: str, name: str) -> str | None:
     if ecosystem == OPENVSX_ECOSYSTEM:
         publisher, _sep, extension = text.partition(".")
         return release_name(publisher, extension) if extension else None
+    if ecosystem == RUBYGEMS_ECOSYSTEM:
+        return text.lower() if valid_gem_name(text) else None
+    if ecosystem == CRATES_ECOSYSTEM:
+        return text.lower() if crate_segment(text) else None
     return None
 
 

@@ -2012,10 +2012,7 @@ def serve(
                     daemon=True,
                 )
             )
-        if (config.rubygems or config.crates) and _watched_only(config):
-            # Neither feed can filter by the user watchlist in v1.
-            log.warning("HUNTER_WATCH_MODE=watched: the RubyGems and crates.io polls are not started")
-        if config.rubygems and not _watched_only(config):
+        if config.rubygems:
             polls.append(
                 threading.Thread(
                     target=_feed_loop,
@@ -2028,7 +2025,7 @@ def serve(
                     daemon=True,
                 )
             )
-        if config.crates and not _watched_only(config):
+        if config.crates:
             polls.append(
                 threading.Thread(
                     target=_feed_loop,
