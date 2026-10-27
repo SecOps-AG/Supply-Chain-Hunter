@@ -1,0 +1,13 @@
+{
+  "attestation_bundles": [
+    {
+      "publisher": {
+        "environment": "pypi",
+        "kind": "GitLab",
+        "repository": "org/pkg",
+        "workflow": "release.yml"
+      }
+    }
+  ],
+  "version": 1
+}

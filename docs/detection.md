@@ -19,7 +19,7 @@ Optional (`HUNTER_TAKEOVER_SIGNALS`, off by default). Before Scout reads a relea
 | Signal | Weight | Source |
 | --- | --- | --- |
 | `provenance_lost` | 40 | The previous release had a provenance attestation and this one doesn't. npm: `/-/npm/v1/attestations/{name}@{version}`; PyPI: the Integrity API `/integrity/{project}/{version}/{file}/provenance`. |
-| `provenance_identity_changed` | 30 | Both have provenance, but the source repository or workflow differs. |
+| `provenance_identity_changed` | 30 | Both have provenance, but the source repository, workflow or builder differs (PyPI: publisher kind, repository, workflow or environment). A provenance statement that can no longer be read, after a named one, also counts. The workflow ref is ignored because it changes with every tag. |
 | `publisher_new` | 25 | npm: the `_npmUser` that published this release never published an earlier one. |
 | `maintainer_added` | 20 | npm: a name in `maintainers` the previous release didn't list. PyPI: an owner in the JSON API `ownership` block that wasn't there when Hunter last scored the project. |
 | `publisher_email_changed` | 20 | npm: same publisher, new email. PyPI: none of the per-version author and maintainer emails match the previous release. |
