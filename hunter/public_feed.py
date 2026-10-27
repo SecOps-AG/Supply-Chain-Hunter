@@ -81,9 +81,14 @@ class PublicAlert:
         return f"{self.ecosystem}:{self.name}:{self.version}"
 
 
+# Characters XML 1.0 does not allow: lone surrogates, U+FFFE and U+FFFF (C0 controls are handled in _plain).
+_NOT_XML_CHAR = re.compile("[\ud800-\udfff\ufffe\uffff]")
+
+
 def _plain(value: object, limit: int) -> str:
-    """Single-line text. Control characters in package names become spaces."""
+    """Single-line text. Control characters in package names become spaces; non-XML characters are dropped."""
     text = "".join(" " if ord(char) < 32 or ord(char) == 127 else char for char in str(value or ""))
+    text = _NOT_XML_CHAR.sub("", text)
     return " ".join(text.split())[:limit]
 
 
@@ -276,11 +281,12 @@ def render_json_feed(rows: list, *, base_url: str, title: str) -> bytes:
         "authors": [{"name": AUTHOR_NAME}],
         "items": items,
     }
-    return (json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    return (json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8", errors="replace")
 
 
 def _xml(value: str) -> str:
-    return escape(value, {'"': "&quot;"})
+    text = re.sub("[\x00-\x08\x0b\x0c\x0e-\x1f]", "", _NOT_XML_CHAR.sub("", value))
+    return escape(text, {'"': "&quot;"})
 
 
 def _rss_date(iso_text: str) -> str:
@@ -317,7 +323,7 @@ def render_rss(rows: list, *, base_url: str, title: str) -> bytes:
         lines.append(f"      <description>{_xml(alert_summary(alert))}</description>")
         lines.append("    </item>")
     lines.extend(["  </channel>", "</rss>", ""])
-    return "\n".join(lines).encode("utf-8")
+    return "\n".join(lines).encode("utf-8", errors="replace")
 
 
 def feed_digest(json_body: bytes, xml_body: bytes, base_url: str, cache_max_age: int) -> str:
