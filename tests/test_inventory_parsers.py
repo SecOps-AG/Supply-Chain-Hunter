@@ -323,7 +323,7 @@ CYCLONEDX = json.dumps(
             {"name": "outer", "purl": "pkg:npm/outer@1.0.0", "components": [{"name": "b", "purl": "pkg:npm/%40scope/inner@2.0.0"}]},
             {"name": "requests", "purl": "pkg:pypi/requests@2.31.0?vcs_url=x#sub"},
             {"name": "checkout", "purl": "pkg:githubactions/actions/checkout@v4"},
-            {"name": "serde", "purl": "pkg:cargo/serde@1.0.0"},
+            {"name": "mux", "purl": "pkg:golang/github.com/gorilla/mux@v1.8.0"},
             {"name": "no-purl"},
         ],
     }
@@ -339,7 +339,7 @@ def test_cyclonedx_nested_scoped_actions_and_unknown_types():
         ("pypi", "requests", "2.31.0", None),
         ("github-actions", "actions/checkout", "v4", None),
     }
-    assert result.skipped == 2  # pkg:cargo and the component without a purl
+    assert result.skipped == 2  # pkg:golang and the component without a purl
 
 
 SPDX = json.dumps(
@@ -374,7 +374,7 @@ def test_purl_forms():
     assert parse_purl("pkg:pypi/Foo_Bar@1.0") == Component("pypi", "foo-bar", "1.0")
     assert parse_purl("pkg:github/Owner/Repo@" + SHA) == Component("github-actions", "owner/repo", SHA)
     assert parse_purl("pkg:githubactions/o/r/sub/path@v1") == Component("github-actions", "o/r", "v1")
-    assert parse_purl("pkg:gem/rails@7.0.0") is None
+    assert parse_purl("pkg:golang/github.com/gorilla/mux@v1.8.0") is None
     assert parse_purl("not a purl") is None
 
 
@@ -391,7 +391,7 @@ github-actions docker/login-action
 vscode ms-python.python 2024.1.0
 openvsx:redhat.java
 pkg:npm/left-pad@1.3.0
-cargo serde 1.0.0
+golang mux 1.8.0
 """
 
 
@@ -411,7 +411,7 @@ def test_plain_list_every_syntax_and_alias():
         ("npm", "left-pad", "1.3.0", 1),
     }
     assert result.skipped == 1
-    assert any("cargo" in warning for warning in result.warnings)
+    assert any("golang" in warning for warning in result.warnings)
 
 
 WORKFLOW = f"""name: CI

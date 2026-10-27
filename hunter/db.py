@@ -65,10 +65,11 @@ MIGRATIONS: tuple[str, ...] = (
 )
 
 # Ecosystems a user watchlist row may hold.
-USER_WATCH_ECOSYSTEMS = ("npm", "pypi", "github-actions", "openvsx")
+USER_WATCH_ECOSYSTEMS = ("npm", "pypi", "github-actions", "openvsx", "rubygems", "crates")
 # Keeps only `releases` rows whose name is on the user watchlist.
 _USER_WATCH_FILTER = (
-    "AND EXISTS (SELECT 1 FROM user_watch w WHERE w.ecosystem = releases.ecosystem AND w.name = releases.name)"
+    "AND EXISTS (SELECT 1 FROM user_watch w WHERE w.ecosystem = releases.ecosystem AND w.name = "
+    "CASE WHEN releases.ecosystem IN ('rubygems', 'crates') THEN lower(releases.name) ELSE releases.name END)"
 )
 
 

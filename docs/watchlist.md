@@ -1,6 +1,6 @@
 # Your watchlist
 
-Hunter watches the most popular npm, PyPI and GitHub Actions packages by default. A user watchlist adds the packages one environment actually uses, read from its lockfiles, SBOMs, manifests, workflow files or a typed list. With `HUNTER_WATCH_MODE=watched`, Hunter watches only those packages.
+Hunter watches the most popular npm, PyPI and GitHub Actions packages by default. A user watchlist adds the packages one environment actually uses (npm, PyPI, GitHub Actions, Open VSX, RubyGems and crates.io), read from its lockfiles, SBOMs, manifests, workflow files or a typed list. With `HUNTER_WATCH_MODE=watched`, Hunter watches only those packages.
 
 v1 serves one environment per deployment. Every alert goes to the one `ALERT_WEBHOOK_URL`.
 
@@ -21,9 +21,11 @@ hunter watchlist import PATH [PATH ...] [--source LABEL] [--format FMT] [--dry-r
 | `requirements` | `requirements*.txt` | Names, with the version only for `==` or `===`. `-r` and `-c` includes are not followed (import those files too); `-e` lines are skipped. |
 | `toml-lock` | `poetry.lock`, `uv.lock` | Every `[[package]]`. Editable, virtual and local packages are skipped. |
 | `pipfile-lock` | `Pipfile.lock` | `default` and `develop`. |
-| `cyclonedx` | `*.cdx.json`, `bom.json` | Component purls, including nested components. |
+| `gemfile-lock` | `Gemfile.lock` | Specs under `GEM` sections whose remote is rubygems.org, with a platform suffix kept (`1.13.9-x86_64-linux`). Direct when `DEPENDENCIES` names the gem. `GIT`, `PATH` and other gem servers are skipped. |
+| `cargo-lock` | `Cargo.lock` | `[[package]]` entries whose source is the crates.io registry (git, path and other-registry packages are skipped). |
+| `cyclonedx` | `*.cdx.json`, `bom.json` | Component purls, including nested components. Purl types: `npm`, `pypi`, `githubactions`, `openvsx`, `gem` and `cargo`. |
 | `spdx` | `*.spdx.json`, `sbom*.json` | Package purls from `externalRefs`. |
-| `plain` | any | One package per line: `npm lodash 4.17.21`, `pypi:requests@2.31.0`, `actions actions/checkout v4`, `vscode ms-python.python`, or a `pkg:` purl. Ecosystem names: `npm`; `pypi` or `pip`; `github-actions`, `actions` or `gha`; `openvsx` or `vscode`. |
+| `plain` | any | One package per line: `npm lodash 4.17.21`, `pypi:requests@2.31.0`, `actions actions/checkout v4`, `vscode ms-python.python`, or a `pkg:` purl. Ecosystem names: `npm`; `pypi` or `pip`; `github-actions`, `actions` or `gha`; `openvsx` or `vscode`; `rubygems` or `gem`; `crates` or `cargo`. |
 | `workflow` | `.github/workflows/*.yml`, `action.yml` | Every remote `uses:` with its tag or commit sha. Local (`./`) and `docker://` steps are skipped. |
 
 A directory is walked for the file names in the table. `node_modules`, `.git`, `.venv`, `venv`, `site-packages`, `dist`, `build` and `vendor` are skipped, and no symlink is followed.
@@ -47,7 +49,7 @@ A name removed by hand comes back the next time a source that lists it is import
 `status` prints the mode, the alert scope, counts and sources, and warns when:
 
 - the mode is `all` and a watchlist exists (Hunter also watches and alerts on the popular lists);
-- GitHub Actions are listed but `HUNTER_ACTIONS` is off, or Open VSX extensions are listed but `HUNTER_OPENVSX` is off;
+- GitHub Actions are listed but `HUNTER_ACTIONS` is off, Open VSX extensions are listed but `HUNTER_OPENVSX` is off, gems are listed but `HUNTER_RUBYGEMS` is off, or crates are listed but `HUNTER_CRATES` is off;
 - a source was imported more than 7 days ago;
 - the mode is `watched` but the watchlist is empty.
 
@@ -57,9 +59,10 @@ To keep the list current from files on disk, set `HUNTER_WATCHLIST_PATHS`; `serv
 
 `HUNTER_WATCH_MODE=watched`:
 
-- The npm, PyPI, GitHub Actions and Open VSX polls queue releases only for listed names. GitHub Actions still needs `HUNTER_ACTIONS=on`, and Open VSX `HUNTER_OPENVSX=on`.
+- The npm, PyPI, GitHub Actions, Open VSX, RubyGems and crates.io polls queue releases only for listed names. GitHub Actions still needs `HUNTER_ACTIONS=on`, Open VSX `HUNTER_OPENVSX=on`, RubyGems `HUNTER_RUBYGEMS=on` and crates.io `HUNTER_CRATES=on`.
 - The popular lists are not downloaded and no lookalike (typosquat) names are checked. MCP registry names are left out.
-- The RubyGems and crates.io polls do not start; they cannot be filtered by name in v1.
+- The RubyGems and crates.io polls still read their whole feeds (RubyGems timeframe versions, crates.io RSS) and keep only listed names; their checkpoints move past the rest. A crates.io gap backfill reads the index only for listed crates, and the download-rank list is not fetched.
+- Gem and crate names are matched without regard to case.
 - The alert scope defaults to `watched`, and the local dashboard opens with "Watched only" on.
 
 Scout cost then follows how often your listed packages publish. The Triage and Analyst gates do not change.

@@ -35,6 +35,8 @@ EXACT_NAMES = {
     "poetry.lock",
     "uv.lock",
     "pipfile.lock",
+    "gemfile.lock",
+    "cargo.lock",
     "bom.json",
     "action.yml",
     "action.yaml",

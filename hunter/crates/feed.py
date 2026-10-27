@@ -183,6 +183,11 @@ def versions_in_gap(lines: list[dict], start: datetime, end: datetime) -> list[d
     return [line for line in lines if _in_gap(line, start, end)]
 
 
+def _watch_mode(config) -> bool:
+    """HUNTER_WATCH_MODE=watched: only the user watchlist, no popular list and no lookalikes."""
+    return getattr(config, "watch_mode", "all") == "watched"
+
+
 def _queue(db: Database, name: str, version: str, rank: int | None, max_pending: int | None) -> str:
     if db.enqueue_job(ECOSYSTEM, name, version, rank, max_pending=max_pending):
         return "queued"
@@ -197,9 +202,15 @@ def _admit(
     *,
     watched_only: bool,
     typo_left: int,
+    user: frozenset[str] = frozenset(),
 ) -> tuple[bool, int | None, int]:
-    """Whether to queue ``name``. The typosquat cap applies only in watched-only mode."""
+    """Whether to queue ``name``. The typosquat cap applies only in watched-only mode.
+
+    ``user`` holds the user watchlist names; they are always queued.
+    """
     lowered = {str(key).lower(): int(rank) for key, rank in watch.items()}
+    if name.lower() in user:
+        return True, lowered.get(name.lower()), typo_left
     if name in lowered:
         return True, lowered[name], typo_left
     victim = victim_name(name, lowered)
@@ -218,14 +229,16 @@ def _store_version(
     version: str,
     watch: dict[str, int],
     typo_left: int,
+    user: frozenset[str] = frozenset(),
 ) -> tuple[str, int]:
     if not safe_segment(name) or not safe_segment(version):
         return "skipped", typo_left
     allowed, rank, typo_left = _admit(
         name,
         watch,
-        watched_only=bool(getattr(config, "crates_watched_only", False)),
+        watched_only=bool(getattr(config, "crates_watched_only", False)) or _watch_mode(config),
         typo_left=typo_left,
+        user=user,
     )
     if not allowed:
         return "skipped", typo_left
@@ -321,6 +334,7 @@ def _backfill(
     watch: dict[str, int],
     typo_left: int,
     stop: threading.Event | None,
+    user: frozenset[str] = frozenset(),
 ) -> tuple[int, int, bool]:
     """Queue index versions published in ``(start, end)``.
 
@@ -352,6 +366,8 @@ def _backfill(
             name = str(item.get("name") or item.get("id") or "").strip().lower()
             if not safe_segment(name):
                 continue
+            if _watch_mode(config) and name not in user:
+                continue
             try:
                 lines = _fetch_index(config, name, transport)
             except (FeedError, OSError, ValueError, UnicodeError) as exc:
@@ -359,7 +375,7 @@ def _backfill(
                 continue
             for line in versions_in_gap(lines, start, end):
                 version = str(line.get("vers") or "")
-                state, typo_left = _store_version(db, config, name, version, watch, typo_left)
+                state, typo_left = _store_version(db, config, name, version, watch, typo_left, user)
                 if state == "queued":
                     queued += 1
                 elif state == "refused":
@@ -383,12 +399,17 @@ def poll_crates(
     """Queue crate versions newer than the checkpoint. Returns how many were queued.
 
     The first call only records the newest ``pubDate``. ``HUNTER_MAX_PENDING``
-    leaves the checkpoint unchanged so the refused item is tried again.
+    leaves the checkpoint unchanged so the refused item is tried again. In
+    ``HUNTER_WATCH_MODE=watched`` only user watchlist names are queued, the
+    download-rank list is not fetched and no lookalikes are checked.
     """
-    try:
-        refresh_crates_watchlist(db, config, transport, stop)
-    except Exception:
-        log.warning("crates watchlist refresh failed", exc_info=True)
+    watched = _watch_mode(config)
+    if not watched:
+        # Watched mode does not download the popular list.
+        try:
+            refresh_crates_watchlist(db, config, transport, stop)
+        except Exception:
+            log.warning("crates watchlist refresh failed", exc_info=True)
     updates = parse_rss(_read_body(transport(config.crates_updates_rss, 60)))
     names = parse_rss(_read_body(transport(config.crates_crates_rss, 60)))
     items: dict[tuple[str, str], FeedItem] = {}
@@ -407,13 +428,14 @@ def poll_crates(
     checkpoint = parse_time(saved)
     if checkpoint is None:
         checkpoint = utcnow()
-    watch = db.watch_names(ECOSYSTEM)
+    watch = {} if watched else db.watch_names(ECOSYSTEM)
+    user = frozenset(db.user_watch_names(ECOSYSTEM))
     typo_left = TYPOSQUAT_QUEUE_LIMIT
     queued = 0
     if ordered and min(item.published for item in ordered) > checkpoint:
         try:
             added, typo_left, finished = _backfill(
-                db, config, transport, checkpoint, min(item.published for item in ordered), watch, typo_left, stop
+                db, config, transport, checkpoint, min(item.published for item in ordered), watch, typo_left, stop, user
             )
         except (FeedError, OSError, ValueError, json.JSONDecodeError, UnicodeError) as exc:
             log.warning("crates gap backfill failed: %s", exc)
@@ -436,7 +458,7 @@ def poll_crates(
             if not version:
                 log.warning("crates new name %s had no index version", item.name)
                 continue
-        state, typo_left = _store_version(db, config, item.name, version, watch, typo_left)
+        state, typo_left = _store_version(db, config, item.name, version, watch, typo_left, user)
         if state == "queued":
             queued += 1
         elif state == "refused":

@@ -411,6 +411,10 @@ def watchlist_warnings(db: Database, config: Config) -> list[str]:
         found.append(f"{counts['github-actions']} GitHub Actions are listed but HUNTER_ACTIONS is off; their tags are not polled.")
     if counts["openvsx"] and not config.openvsx:
         found.append(f"{counts['openvsx']} Open VSX extensions are listed but HUNTER_OPENVSX is off; they are not polled.")
+    if counts["rubygems"] and not config.rubygems:
+        found.append(f"{counts['rubygems']} gems are listed but HUNTER_RUBYGEMS is off; they are not polled.")
+    if counts["crates"] and not config.crates:
+        found.append(f"{counts['crates']} crates are listed but HUNTER_CRATES is off; they are not polled.")
     for row in db.user_watch_sources():
         if is_stale(row["imported_at"]):
             found.append(f"source {row['source']} was imported more than 7 days ago ({row['imported_at']}); import it again.")
@@ -673,7 +677,7 @@ def build_parser() -> argparse.ArgumentParser:
     wl_import.add_argument("--json", action="store_true")
     wl_import.set_defaults(func=_cmd_watchlist)
     wl_add = watchlist_sub.add_parser("add", help="add one package by hand (source 'manual')")
-    wl_add.add_argument("ecosystem", help="npm, pypi, github-actions or openvsx")
+    wl_add.add_argument("ecosystem", help="npm, pypi, github-actions, openvsx, rubygems or crates")
     wl_add.add_argument("name")
     wl_add.add_argument("version", nargs="?", default="")
     wl_add.set_defaults(func=_cmd_watchlist)

@@ -5,8 +5,10 @@ from __future__ import annotations
 from urllib.parse import unquote
 
 from hunter.actions import ECOSYSTEM as ACTIONS_ECOSYSTEM
+from hunter.crates import ECOSYSTEM as CRATES_ECOSYSTEM
 from hunter.inventory import Component, component
 from hunter.openvsx import ECOSYSTEM as OPENVSX_ECOSYSTEM
+from hunter.rubygems import ECOSYSTEM as RUBYGEMS_ECOSYSTEM
 
 _TYPES = {
     "npm": "npm",
@@ -15,6 +17,8 @@ _TYPES = {
     "github": ACTIONS_ECOSYSTEM,
     "openvsx": OPENVSX_ECOSYSTEM,
     "vscode-extension": OPENVSX_ECOSYSTEM,
+    "gem": RUBYGEMS_ECOSYSTEM,
+    "cargo": CRATES_ECOSYSTEM,
 }
 
 
@@ -48,7 +52,7 @@ def parse_purl(text: str, direct: int | None = None) -> Component | None:
             name = f"{scope}/{parts[1]}"
         else:
             return None
-    elif ecosystem == "pypi":
+    elif ecosystem in {"pypi", RUBYGEMS_ECOSYSTEM, CRATES_ECOSYSTEM}:
         if len(parts) != 1:
             return None
         name = parts[0]
