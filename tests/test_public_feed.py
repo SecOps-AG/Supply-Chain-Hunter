@@ -518,3 +518,22 @@ def test_watched_mode_blocks_the_public_feed_even_with_an_empty_list(tmp_path):
     assert publish_public_feed(db, _feed_config(watch_mode="watched"), client=client) is False
     assert client.calls == []
     assert publish_public_feed(db, _feed_config(), client=client) is True
+
+
+def test_feeds_drop_characters_that_are_not_valid_xml():
+    row = {
+        "ecosystem": "npm",
+        "name": "bad\ud800name\ufffe\uffff",
+        "version": "1.0.0\udfff",
+        "previous_version": "0.9\x0b",
+        "registry_url": None,
+        "behavior": "",
+        "cause": "",
+        "limited_review": 0,
+        "first_seen_at": "2026-10-26T00:00:00Z",
+    }
+    xml_body = render_rss([row], base_url="https://feed.example", title="t\ufffe")
+    root = ET.fromstring(xml_body)
+    assert root.find("channel/item/guid").text == "npm:badname:1.0.0"
+    json_body = render_json_feed([row], base_url="https://feed.example", title="t")
+    assert json.loads(json_body)["items"][0]["id"] == "npm:badname:1.0.0"
