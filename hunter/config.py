@@ -215,6 +215,30 @@ def _name_list(name: str) -> tuple[str, ...]:
     return tuple(found)
 
 
+def _path_list(name: str) -> tuple[str, ...]:
+    """Comma separated paths, in order, without repeats. Case and spaces inside a path are kept."""
+    found: list[str] = []
+    for part in os.environ.get(name, "").split(","):
+        text = part.strip()
+        if text and text not in found:
+            found.append(text)
+    return tuple(found)
+
+
+def _choice(name: str, allowed: tuple[str, ...], default: str) -> str:
+    """One of ``allowed``. Unset means ``default``; any other value stops startup."""
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw:
+        return default
+    if raw not in allowed:
+        raise ValueError(f"{name} must be one of {', '.join(allowed)}; got {raw[:40]!r}")
+    return raw
+
+
+WATCH_MODES = ("all", "watched")
+ALERT_SCOPES = ("all", "watched")
+
+
 def _unit_interval(name: str, default: float) -> float:
     raw = os.environ.get(name)
     if raw is None or not raw.strip():
@@ -234,6 +258,15 @@ class Config:
     top_n: int = 15000
     poll_interval: float = 300.0
     watchlist_refresh: float = 6 * 3600
+    # User watchlist (hunter/inventory). HUNTER_WATCH_MODE=all watches the popular lists plus
+    # the user's names; watched polls only the user's names. HUNTER_ALERT_SCOPE=watched sends
+    # the webhook only for listed names. HUNTER_WATCHLIST_PATHS are re-imported every
+    # HUNTER_WATCHLIST_REFRESH seconds.
+    watch_mode: str = "all"
+    alert_scope: str = "all"
+    watchlist_paths: tuple[str, ...] = ()
+    watchlist_max_file_bytes: int = 20 * 1024 * 1024
+    watchlist_max_files: int = 2000
     # Each worker can have an old and a new sdist and wheel open at once.
     # Four is the overlap a production host handled well. Eight held too many
     # archives at the same time. Set HUNTER_WORKERS to change it.
@@ -448,11 +481,20 @@ class Config:
                 analyst_base_url = resolve_openrouter_base_url("")
         top_n = int(os.environ.get("HUNTER_TOP_N", "15000"))
         mcp_poll_interval = max(300.0, float(os.environ.get("HUNTER_MCP_POLL_INTERVAL", "3600")))
+        watch_mode = _choice("HUNTER_WATCH_MODE", WATCH_MODES, "all")
+        alert_scope = _choice("HUNTER_ALERT_SCOPE", ALERT_SCOPES, "watched" if watch_mode == "watched" else "all")
         return cls(
             db_path=Path(os.environ.get("HUNTER_DB", "hunter.sqlite3")),
             top_n=top_n,
             poll_interval=float(os.environ.get("HUNTER_POLL_INTERVAL", "300")),
             watchlist_refresh=float(os.environ.get("HUNTER_WATCHLIST_REFRESH", str(6 * 3600))),
+            watch_mode=watch_mode,
+            alert_scope=alert_scope,
+            watchlist_paths=_path_list("HUNTER_WATCHLIST_PATHS"),
+            watchlist_max_file_bytes=max(
+                1024, int(float(os.environ.get("HUNTER_WATCHLIST_MAX_FILE_MB", "20")) * 1024 * 1024)
+            ),
+            watchlist_max_files=max(1, int(os.environ.get("HUNTER_WATCHLIST_MAX_FILES", "2000"))),
             workers=int(os.environ.get("HUNTER_WORKERS", "4")),
             webhook_url=os.environ.get("ALERT_WEBHOOK_URL", ""),
             webhook_secret=os.environ.get("ALERT_WEBHOOK_SECRET", ""),

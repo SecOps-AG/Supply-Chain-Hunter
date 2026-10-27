@@ -590,3 +590,20 @@ def test_existing_published_releases_are_rechecked_after_upgrade(tmp_path):
     database.close()
     reopened = Database(path)
     assert "npm:demo-pad:1.0.1" in reopened.public_dash_releases_to_check(["npm:demo-pad:1.0.1"])
+
+
+def test_a_user_watchlist_blocks_the_public_dashboard(db):
+    client = MagicMock()
+    db.add_user_watch("pypi", "private-internal-lib")
+    assert publish_public_dash(db, _dash_config(), started=time.monotonic(), meter=None, client=client, now=utcnow()) is False
+    assert client.put_object.call_count == 0
+    assert db.public_dash_state()["last_error"] == "disabled: private watchlist present"
+    db.remove_user_watch_name("pypi", "private-internal-lib")
+    assert publish_public_dash(db, _dash_config(), started=time.monotonic(), meter=None, client=client, now=utcnow()) is True
+
+
+def test_watched_mode_blocks_the_public_dashboard(db):
+    client = MagicMock()
+    config = _dash_config(watch_mode="watched")
+    assert publish_public_dash(db, config, started=time.monotonic(), meter=None, client=client, now=utcnow()) is False
+    assert client.put_object.call_count == 0

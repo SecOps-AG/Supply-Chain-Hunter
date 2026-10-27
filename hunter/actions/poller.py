@@ -174,12 +174,18 @@ def poll_actions(
     so its whole baseline is written at once.
     """
     moment = now or utcnow()
-    watch = db.watch_names(ECOSYSTEM)
+    watch = db.poll_targets(
+        ECOSYSTEM,
+        include_ranked=getattr(config, "watch_mode", "all") != "watched",
+        include_mcp=False,
+        include_user=True,
+    )
     if not watch:
         return 0
     states = db.action_states()
     sweep = not client.has_token or sweep_due(db, config, moment)
-    names = sorted(watch, key=lambda item: watch[item])
+    # Names only on the user watchlist have no rank; they sort after the ranked ones.
+    names = sorted(watch, key=lambda item: (watch[item] is None, watch[item] or 0, item))
     over_git = [name for name in names if sweep or _needs_seed(states.get(name), moment)]
     over_graphql = [name for name in names if name not in set(over_git)]
     queued = 0

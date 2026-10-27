@@ -497,3 +497,24 @@ def test_teach_does_not_record_a_public_feed_row(tmp_path, monkeypatch):
     assert result["alert_sent"] is False
     assert recorded == []
     assert not (tmp_path / "hunter.sqlite3").exists()
+
+
+def test_a_user_watchlist_blocks_the_public_feed(tmp_path):
+    db = Database(tmp_path / "hunter.sqlite3")
+    client = FakeR2()
+    record_public_alert(db, _evidence(), when=LATE)
+    db.add_user_watch("npm", "private-internal-lib")
+    assert publish_public_feed(db, _feed_config(), client=client) is False
+    assert client.calls == []
+    assert db.public_feed_state()["last_error"] == "disabled: private watchlist present"
+    assert health_payload(db, 0.0, config=_feed_config())["feed_last_error"] == "disabled: private watchlist present"
+    db.remove_user_watch_name("npm", "private-internal-lib")
+    assert publish_public_feed(db, _feed_config(), client=client) is True
+
+
+def test_watched_mode_blocks_the_public_feed_even_with_an_empty_list(tmp_path):
+    db = Database(tmp_path / "hunter.sqlite3")
+    client = FakeR2()
+    assert publish_public_feed(db, _feed_config(watch_mode="watched"), client=client) is False
+    assert client.calls == []
+    assert publish_public_feed(db, _feed_config(), client=client) is True

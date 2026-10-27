@@ -79,6 +79,8 @@ def poll_openvsx(db: Database, config, transport: HttpGet = http_get, stop: thre
     checkpoint = saved
     queued = 0
     removed = 0
+    # Watched mode keeps only listed extensions. The checkpoint still advances past the rest.
+    listed = db.user_watch_names(ECOSYSTEM) if getattr(config, "watch_mode", "all") == "watched" else None
     for _page in range(MAX_PAGES_PER_POLL):
         if stop is not None and stop.is_set():
             break
@@ -93,6 +95,8 @@ def poll_openvsx(db: Database, config, transport: HttpGet = http_get, stop: thre
             name = release_name(str(change.get("namespace") or ""), str(change.get("name") or ""))
             version = str(change.get("version") or "").strip()
             if name is None or not version or len(version) > 128 or "/" in version:
+                continue
+            if listed is not None and name not in listed:
                 continue
             platform = str(change.get("targetPlatform") or "universal").strip().lower() or "universal"
             state = str(change.get("state") or "").strip().upper() or "UNKNOWN"

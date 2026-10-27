@@ -35,6 +35,7 @@
       <div class="subrow">npm and PyPI releases and GitHub Actions tags watched by Hunter, from feed to alert.</div>
     </div>
     <div class="grow"></div>
+    <label class="chk wl-toggle" id="watched-wrap" hidden><input type="checkbox" id="watched-only">Watched only</label>
     <div class="seg" id="range" role="group" aria-label="Time range">
       <button type="button" data-range="1h">1h</button>
       <button type="button" data-range="24h" aria-pressed="true">24h</button>
@@ -50,6 +51,11 @@
     <div class="tile kpi k s2" id="kpi-triage"></div>
     <div class="tile kpi k s2" id="kpi-confirmed"></div>
     <div class="tile kpi k s2" id="kpi-latency"></div>
+  </section>
+
+  <section class="tile" id="wl-card" aria-label="Your watchlist" hidden>
+    <div class="th"><h2>Your watchlist</h2><span class="hint" id="wl-hint"></span></div>
+    <div class="tb" id="wl-body"></div>
   </section>
 
   <section class="tile rail" aria-label="Pipeline">

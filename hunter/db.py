@@ -43,6 +43,32 @@ MIGRATIONS: tuple[str, ...] = (
     CREATE INDEX IF NOT EXISTS outbox_created ON outbox (created_at);
     CREATE INDEX IF NOT EXISTS takeover_signals_package_created ON takeover_signals (ecosystem, name, created_at);
     """,
+    # User watchlist (hunter/inventory). Kept apart from `watchlist`, which every ranked refresh replaces.
+    """
+    CREATE TABLE IF NOT EXISTS user_watch_sources (
+        source TEXT PRIMARY KEY,
+        format TEXT NOT NULL,
+        imported_at TEXT NOT NULL,
+        components INTEGER NOT NULL,
+        skipped INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE IF NOT EXISTS user_watch (
+        ecosystem TEXT NOT NULL,
+        name TEXT NOT NULL,
+        version TEXT NOT NULL DEFAULT '',
+        direct INTEGER,
+        source TEXT NOT NULL,
+        PRIMARY KEY (ecosystem, name, version, source)
+    );
+    CREATE INDEX IF NOT EXISTS user_watch_name ON user_watch (ecosystem, name);
+    """,
+)
+
+# Ecosystems a user watchlist row may hold.
+USER_WATCH_ECOSYSTEMS = ("npm", "pypi", "github-actions", "openvsx")
+# Keeps only `releases` rows whose name is on the user watchlist.
+_USER_WATCH_FILTER = (
+    "AND EXISTS (SELECT 1 FROM user_watch w WHERE w.ecosystem = releases.ecosystem AND w.name = releases.name)"
 )
 
 
@@ -1833,28 +1859,29 @@ class Database:
 
     # Read-only queries for the dashboard. None of these change state.
 
-    def release_bucket_counts(self, since: str, width: int) -> list[dict]:
+    def release_bucket_counts(self, since: str, width: int, watched_only: bool = False) -> list[dict]:
         """Classified releases per time bucket, ecosystem and band. `width` is the ISO prefix length."""
         with self._lock:
             rows = self._conn.execute(
-                """
+                f"""
                 SELECT substr(created_at, 1, ?) AS bucket, ecosystem, band, COUNT(*) AS n
-                FROM releases WHERE created_at >= ?
+                FROM releases WHERE created_at >= ? {_USER_WATCH_FILTER if watched_only else ""}
                 GROUP BY bucket, ecosystem, band
                 """,
                 (width, since),
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def flagged_releases_since(self, since: str, limit: int = 5000) -> list[dict]:
+    def flagged_releases_since(self, since: str, limit: int = 5000, watched_only: bool = False) -> list[dict]:
         """Releases Scout did not clear (review, alert or deferred), newest first."""
         with self._lock:
             rows = self._conn.execute(
-                """
+                f"""
                 SELECT ecosystem, name, version, band, malice_probability, family, subtype,
                        payload_json, created_at
                 FROM releases
                 WHERE created_at >= ? AND band IN ('review', 'alert', 'deferred')
+                  {_USER_WATCH_FILTER if watched_only else ""}
                 ORDER BY created_at DESC
                 LIMIT ?
                 """,
@@ -2461,10 +2488,210 @@ class Database:
         An MCP package that is not on the ranked list has rank None. Typosquat
         checks keep using ``watch_names`` so MCP names never count as popular.
         """
-        watch: dict[str, int | None] = dict(self.watch_names(ecosystem))
-        for name in self.mcp_package_names(ecosystem):
-            watch.setdefault(name, None)
+        return self.poll_targets(ecosystem, include_ranked=True, include_mcp=True, include_user=False)
+
+    def poll_targets(
+        self,
+        ecosystem: str,
+        *,
+        include_ranked: bool = True,
+        include_mcp: bool = False,
+        include_user: bool = False,
+    ) -> dict[str, int | None]:
+        """Names a poll queues releases for. Names not on the ranked list have rank None."""
+        watch: dict[str, int | None] = dict(self.watch_names(ecosystem)) if include_ranked else {}
+        if include_mcp:
+            for name in self.mcp_package_names(ecosystem):
+                watch.setdefault(name, None)
+        if include_user:
+            for name in self.user_watch_names(ecosystem):
+                watch.setdefault(name, None)
         return watch
+
+    # --- User watchlist ------------------------------------------------------
+
+    def _user_watch_pairs(self) -> set[tuple[str, str]]:
+        rows = self._conn.execute("SELECT DISTINCT ecosystem, name FROM user_watch").fetchall()
+        return {(str(row["ecosystem"]), str(row["name"])) for row in rows}
+
+    def _recount_user_watch_sources(self) -> None:
+        self._conn.execute(
+            """
+            UPDATE user_watch_sources SET components = (
+                SELECT COUNT(*) FROM user_watch w WHERE w.source = user_watch_sources.source
+            )
+            """
+        )
+
+    def replace_user_watch_source(
+        self,
+        source: str,
+        fmt: str,
+        rows: list[tuple[str, str, str, int | None]],
+        skipped: int = 0,
+        when: datetime | None = None,
+    ) -> list[tuple[str, str]]:
+        """Replace one source's rows in one transaction. Returns (ecosystem, name) pairs new to the poll set.
+
+        ``rows`` are (ecosystem, name, version, direct) with names already normalized.
+        """
+        moment = iso(when or utcnow())
+        cleaned: dict[tuple[str, str, str], int | None] = {}
+        for ecosystem, name, version, direct in rows:
+            if ecosystem not in USER_WATCH_ECOSYSTEMS or not name:
+                continue
+            key = (ecosystem, name, version or "")
+            known = cleaned.get(key)
+            flags = [flag for flag in (known, direct) if flag is not None]
+            cleaned[key] = max(flags) if flags else None
+        with self._lock:
+            try:
+                before = self._user_watch_pairs()
+                self._conn.execute("DELETE FROM user_watch WHERE source = ?", (source,))
+                self._conn.executemany(
+                    "INSERT INTO user_watch (ecosystem, name, version, direct, source) VALUES (?, ?, ?, ?, ?)",
+                    [(eco, name, version, direct, source) for (eco, name, version), direct in cleaned.items()],
+                )
+                self._conn.execute(
+                    """
+                    INSERT INTO user_watch_sources (source, format, imported_at, components, skipped)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(source) DO UPDATE SET
+                        format = excluded.format,
+                        imported_at = excluded.imported_at,
+                        components = excluded.components,
+                        skipped = excluded.skipped
+                    """,
+                    (source, fmt, moment, len(cleaned), int(skipped)),
+                )
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+        return sorted({(eco, name) for eco, name, _version in cleaned} - before)
+
+    def add_user_watch(
+        self,
+        ecosystem: str,
+        name: str,
+        version: str = "",
+        *,
+        source: str = "manual",
+        direct: int | None = 1,
+        when: datetime | None = None,
+    ) -> bool:
+        """Add one row to a source without touching its other rows. True when the name is new to the poll set."""
+        if ecosystem not in USER_WATCH_ECOSYSTEMS or not name:
+            raise ValueError(f"unknown ecosystem {ecosystem!r}")
+        moment = iso(when or utcnow())
+        with self._lock:
+            new = (ecosystem, name) not in self._user_watch_pairs()
+            self._conn.execute(
+                """
+                INSERT INTO user_watch (ecosystem, name, version, direct, source) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(ecosystem, name, version, source) DO UPDATE SET direct = excluded.direct
+                """,
+                (ecosystem, name, version or "", direct, source),
+            )
+            self._conn.execute(
+                """
+                INSERT INTO user_watch_sources (source, format, imported_at, components, skipped)
+                VALUES (?, 'plain', ?, 0, 0)
+                ON CONFLICT(source) DO UPDATE SET imported_at = excluded.imported_at
+                """,
+                (source, moment),
+            )
+            self._recount_user_watch_sources()
+            self._conn.commit()
+        return new
+
+    def remove_user_watch_source(self, source: str) -> int:
+        """Drop one source and its rows. Returns rows removed."""
+        with self._lock:
+            removed = self._conn.execute("DELETE FROM user_watch WHERE source = ?", (source,)).rowcount
+            self._conn.execute("DELETE FROM user_watch_sources WHERE source = ?", (source,))
+            self._conn.commit()
+        return int(removed)
+
+    def remove_user_watch_name(self, ecosystem: str, name: str) -> int:
+        """Drop a name from every source. Returns rows removed. A later import of a source adds it back."""
+        with self._lock:
+            removed = self._conn.execute(
+                "DELETE FROM user_watch WHERE ecosystem = ? AND name = ?",
+                (ecosystem, name),
+            ).rowcount
+            self._recount_user_watch_sources()
+            self._conn.commit()
+        return int(removed)
+
+    def user_watch_names(self, ecosystem: str) -> set[str]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT DISTINCT name FROM user_watch WHERE ecosystem = ?",
+                (ecosystem,),
+            ).fetchall()
+        return {str(row["name"]) for row in rows}
+
+    def user_watch_entries(self, ecosystem: str, name: str) -> list[dict]:
+        """Every listed row for one name, with when its source was imported."""
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT w.version, w.direct, w.source, s.format, s.imported_at
+                FROM user_watch w
+                LEFT JOIN user_watch_sources s ON s.source = w.source
+                WHERE w.ecosystem = ? AND w.name = ?
+                ORDER BY w.source, w.version
+                """,
+                (ecosystem, name),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def user_watch_rows(self, ecosystem: str | None = None) -> list[dict]:
+        with self._lock:
+            if ecosystem:
+                rows = self._conn.execute(
+                    """
+                    SELECT ecosystem, name, version, direct, source FROM user_watch
+                    WHERE ecosystem = ? ORDER BY ecosystem, name, version, source
+                    """,
+                    (ecosystem,),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT ecosystem, name, version, direct, source FROM user_watch ORDER BY ecosystem, name, version, source"
+                ).fetchall()
+        return [dict(row) for row in rows]
+
+    def user_watch_sources(self) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT source, format, imported_at, components, skipped FROM user_watch_sources ORDER BY source"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def user_watch_counts(self) -> dict:
+        """Distinct listed names per ecosystem, the total, and the number of sources."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT ecosystem, COUNT(DISTINCT name) AS n FROM user_watch GROUP BY ecosystem"
+            ).fetchall()
+            sources = self._conn.execute("SELECT COUNT(*) AS n FROM user_watch_sources").fetchone()
+        found = {str(row["ecosystem"]): int(row["n"]) for row in rows}
+        counts = {eco: found.get(eco, 0) for eco in USER_WATCH_ECOSYSTEMS}
+        counts["total"] = sum(counts.values())
+        counts["sources"] = int(sources["n"] or 0)
+        return counts
+
+    def user_watch_oldest_import(self) -> str | None:
+        with self._lock:
+            row = self._conn.execute("SELECT MIN(imported_at) AS oldest FROM user_watch_sources").fetchone()
+        return None if row is None or row["oldest"] is None else str(row["oldest"])
+
+    def has_user_watch(self) -> bool:
+        with self._lock:
+            row = self._conn.execute("SELECT 1 FROM user_watch LIMIT 1").fetchone()
+        return row is not None
 
     def record_openvsx_change(
         self,
