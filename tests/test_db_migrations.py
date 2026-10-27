@@ -298,6 +298,26 @@ def test_pre_tonight_database_upgrades_and_keeps_rows(tmp_path):
     reopened.close()
 
 
+def test_old_database_gains_the_user_watchlist_tables(tmp_path):
+    # A database written by the release before the user watchlist: the first step only.
+    path = tmp_path / "old.sqlite3"
+    Database(path).close()
+    old = sqlite3.connect(path)
+    old.executescript("DROP TABLE user_watch; DROP TABLE user_watch_sources; PRAGMA user_version = 1;")
+    assert {"user_watch", "user_watch_sources"}.isdisjoint(_tables(old))
+    assert _user_version(old) == 1
+    old.close()
+
+    db = Database(path)
+    assert _user_version(db._conn) == len(MIGRATIONS) >= 2
+    assert {"user_watch", "user_watch_sources"} <= _tables(db._conn)
+    assert "user_watch_name" in _indexes(db._conn)
+    assert not db.has_user_watch()
+    db.replace_user_watch_source("manual", "plain", [("npm", "left-pad", "", 1)])
+    assert db.user_watch_names("npm") == {"left-pad"}
+    db.close()
+
+
 def test_migrations_skip_steps_already_applied(tmp_path):
     path = tmp_path / "hunter.sqlite3"
     Database(path).close()

@@ -20,6 +20,7 @@ from hunter.config import (
     smart_analysis_enabled,
 )
 from hunter.db import Database, utcnow
+from hunter.inventory.scope import alert_in_scope, watch_context
 from hunter.lessons import lesson_section, record_overturn, sop_text
 from hunter.llm import (
     CURSOR_BACKEND,
@@ -700,6 +701,25 @@ def _exhaust_investigation(db: Database, row, attempts: int, error: str, *, when
     )
 
 
+def _alert_in_scope(db: Database, cfg: Config, evidence: dict) -> bool:
+    """False when HUNTER_ALERT_SCOPE=watched and the package is not listed. Logs the skip."""
+    ecosystem = str(evidence.get("ecosystem") or "")
+    package = str(evidence.get("package") or "")
+    if alert_in_scope(db, cfg, ecosystem, package):
+        return True
+    log.info("%s/%s %s not on watchlist; webhook skipped", ecosystem, package, evidence.get("new_version"))
+    return False
+
+
+def _watch_context(db: Database, evidence: dict) -> dict | None:
+    return watch_context(
+        db,
+        str(evidence.get("ecosystem") or ""),
+        str(evidence.get("package") or ""),
+        str(evidence.get("new_version") or ""),
+    )
+
+
 def drain_investigations(
     db: Database,
     *,
@@ -789,7 +809,7 @@ def drain_investigations(
                     dump_body(packet).decode("utf-8"),
                     when=moment,
                 )
-            elif triage_confirms and deliver_url:
+            elif triage_confirms and deliver_url and _alert_in_scope(db, cfg, evidence):
                 if not enqueue_analysis(
                     db,
                     evidence,
@@ -802,6 +822,7 @@ def drain_investigations(
                     webhook_url=deliver_url,
                     confirmed_by="triage",
                     analyst_required=False,
+                    watch=_watch_context(db, evidence),
                 ):
                     raise RuntimeError("analysis outbox already contains this release")
         except Exception as exc:
@@ -897,7 +918,7 @@ def drain_analyst(
                     lesson_id = record_overturn(cfg, evidence, analysis_text, when=moment)
                 except Exception as exc:
                     log.error("triage lesson append failed: %s", exc)
-            elif analyst_confirms and deliver_url:
+            elif analyst_confirms and deliver_url and _alert_in_scope(db, cfg, evidence):
                 if not enqueue_analysis(
                     db,
                     evidence,
@@ -912,6 +933,7 @@ def drain_analyst(
                     triage_model_id=str(evidence.get("triage_model_id") or "") or None,
                     triage_verdict=str(evidence.get("triage_verdict") or "") or None,
                     analyst_model_id=model_id,
+                    watch=_watch_context(db, evidence),
                 ):
                     raise RuntimeError("analysis outbox already contains this release")
         except Exception as exc:

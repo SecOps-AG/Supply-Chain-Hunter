@@ -752,15 +752,29 @@ def _queue_npm_versions(
     return queued, "ok"
 
 
-def poll_pypi(db: Database, feed: PypiSerialFeed, *, max_pending: int | None = None, include_mcp: bool = False) -> int:
+def poll_pypi(
+    db: Database,
+    feed: PypiSerialFeed,
+    *,
+    max_pending: int | None = None,
+    include_mcp: bool = False,
+    watch_mode: str = "all",
+) -> int:
     saved = db.get_checkpoint("pypi")
     if saved is None:
         db.set_checkpoint("pypi", str(feed.last_serial()))
         db.mark_poll_success("pypi")
         return 0
     events = list(feed.since(int(saved)))
-    watch = db.watch_names("pypi")
-    targets = db.poll_watch("pypi") if include_mcp else watch
+    watched_only = watch_mode == "watched"
+    # Watched mode has no popular names, so the typosquat check below finds nothing.
+    watch = {} if watched_only else db.watch_names("pypi")
+    targets = db.poll_targets(
+        "pypi",
+        include_ranked=not watched_only,
+        include_mcp=include_mcp and not watched_only,
+        include_user=True,
+    )
     queued = 0
     blocked = False
     for name, version, rank in pypi_events_to_versions(events, targets):
@@ -804,9 +818,16 @@ def poll_npm(db: Database, config: Config, transport: HttpGet = http_get, stop: 
         bootstrap_npm(db, config.npm_changes, transport)
         db.mark_poll_success("npm")
         return 0
-    ranked = db.watch_names("npm")
+    watched_only = getattr(config, "watch_mode", "all") == "watched"
+    # Watched mode has no popular names, so NameIndex matches nothing and no lookalike is queued.
+    ranked = {} if watched_only else db.watch_names("npm")
     # MCP packages are watched for releases but are not popular names for the typosquat check.
-    watch = db.poll_watch("npm") if getattr(config, "mcp_registry", False) else ranked
+    watch = db.poll_targets(
+        "npm",
+        include_ranked=not watched_only,
+        include_mcp=getattr(config, "mcp_registry", False) and not watched_only,
+        include_user=True,
+    )
     popular = {str(name).lower(): int(rank) for name, rank in ranked.items()}
     name_index = NameIndex(popular)
     queued = 0
@@ -1282,7 +1303,14 @@ def apply_feed_start(
 _refresh_lock = threading.Lock()
 
 
+def _watched_only(config: Config) -> bool:
+    return getattr(config, "watch_mode", "all") == "watched"
+
+
 def _refresh_watchlists_if_stale(db: Database, config: Config, transport: HttpGet) -> None:
+    if _watched_only(config):
+        # Watched mode polls only the user's names; the popular lists are not downloaded.
+        return
     if not watchlists_stale(db, config):
         return
     with _refresh_lock:
@@ -1294,12 +1322,48 @@ def _refresh_watchlists_if_stale(db: Database, config: Config, transport: HttpGe
             log.warning("watchlist refresh failed: %s", exc)
 
 
+def _refresh_user_watchlist_safely(db: Database, config: Config) -> None:
+    """Re-import HUNTER_WATCHLIST_PATHS when the last import is older than HUNTER_WATCHLIST_REFRESH."""
+    from hunter.inventory.load import refresh_due, refresh_from_config
+
+    if not refresh_due(db, config):
+        return
+    with _refresh_lock:
+        if not refresh_due(db, config):
+            return
+        try:
+            report = refresh_from_config(db, config)
+        except Exception as exc:
+            # Path and exception class only; never file text.
+            log.warning("user watchlist refresh failed (%s): %s", ",".join(config.watchlist_paths), exc.__class__.__name__)
+            return
+        log.info(
+            "user watchlist refreshed: %d files, %d components%s",
+            len(report.files),
+            report.components,
+            " (partial)" if report.partial else "",
+        )
+        _warn_empty_watched(db, config)
+
+
+def _warn_empty_watched(db: Database, config: Config) -> None:
+    if _watched_only(config) and not db.has_user_watch():
+        log.warning("HUNTER_WATCH_MODE=watched but the user watchlist is empty; polls will queue nothing")
+
+
 def _poll_pypi_safely(db: Database, config: Config, feed, transport: HttpGet) -> None:
     if config.skip_pypi:
         return
+    _refresh_user_watchlist_safely(db, config)
     _refresh_watchlists_if_stale(db, config, transport)
     try:
-        poll_pypi(db, feed, max_pending=config.max_pending, include_mcp=getattr(config, "mcp_registry", False))
+        poll_pypi(
+            db,
+            feed,
+            max_pending=config.max_pending,
+            include_mcp=getattr(config, "mcp_registry", False),
+            watch_mode=getattr(config, "watch_mode", "all"),
+        )
     except Exception as exc:
         db.mark_poll_error("pypi", str(exc))
         log.warning("pypi poll failed: %s", exc)
@@ -1313,6 +1377,7 @@ def _poll_npm_safely(
 ) -> None:
     if config.skip_npm:
         return
+    _refresh_user_watchlist_safely(db, config)
     _refresh_watchlists_if_stale(db, config, transport)
     try:
         poll_npm(db, config, transport, stop)
@@ -1329,6 +1394,8 @@ def actions_watchlist_stale(db: Database, config: Config, now: datetime | None =
 
 
 def _refresh_actions_watchlist_safely(db: Database, config: Config, transport: HttpGet, client: GitHubClient) -> None:
+    if _watched_only(config):
+        return
     if not actions_watchlist_stale(db, config):
         return
     # The startup probe already ran. Check again at the start of each refresh.
@@ -1625,6 +1692,14 @@ def health_payload(
     dash_state = db.public_dash_state()
     payload["dash_last_published_at"] = None if dash_state is None else dash_state["published_at"]
     payload["dash_last_error"] = None if dash_state is None else dash_state["last_error"]
+    if config is not None:
+        # Counts only. Names and source labels stay on /api/watchlist behind the dashboard check.
+        payload["user_watchlist"] = {
+            **db.user_watch_counts(),
+            "mode": getattr(config, "watch_mode", "all"),
+            "alert_scope": getattr(config, "alert_scope", "all"),
+            "oldest_import_at": db.user_watch_oldest_import(),
+        }
     if config is not None and getattr(config, "takeover_signals", False):
         payload["takeover_signals"] = db.takeover_counts()
     if config is not None and getattr(config, "mcp_risk", False):
@@ -1727,6 +1802,8 @@ def start_health(config: Config, db: Database, started: float, meter: SpendMeter
             if not allowed:
                 self._json(403, {"error": reason})
                 return
+            # Watched mode shows only listed packages unless the page asks for watched=0.
+            params.setdefault("watched", "1" if _watched_only(config) else "0")
             try:
                 if path == "/api/snapshot":
                     payload = dashboard.snapshot(
@@ -1735,9 +1812,14 @@ def start_health(config: Config, db: Database, started: float, meter: SpendMeter
                         models=active_role_models(config),
                         range_name=params.get("range"),
                         rules_enabled=rules_enabled(),
+                        watched_only=params["watched"] == "1",
+                        watch_mode=config.watch_mode,
+                        alert_scope=config.alert_scope,
                     )
                 elif path == "/api/findings":
                     payload = dashboard.findings(db, params)
+                elif path == "/api/watchlist":
+                    payload = dashboard.watchlist_summary(db, mode=config.watch_mode, scope=config.alert_scope)
                 elif path == "/api/release":
                     payload = dashboard.release(
                         db, params.get("ecosystem", ""), params.get("name", ""), params.get("version", "")
@@ -1805,6 +1887,17 @@ def serve(
     _dash_publisher = start_public_dash_publisher(db, config, started=started, meter=meter, stop=stop)
     dash_publisher = _dash_publisher
     log.info("hunter serving; health on %s:%s", config.bind, server.server_address[1])
+    counts = db.user_watch_counts()
+    log.info(
+        "watch mode %s, alert scope %s; user watchlist npm %d, pypi %d, github-actions %d, openvsx %d",
+        config.watch_mode,
+        config.alert_scope,
+        counts["npm"],
+        counts["pypi"],
+        counts["github-actions"],
+        counts["openvsx"],
+    )
+    _warn_empty_watched(db, config)
     polls: list[threading.Thread] = []
     try:
         if start is not None:
@@ -1904,7 +1997,10 @@ def serve(
                     daemon=True,
                 )
             )
-        if config.rubygems:
+        if (config.rubygems or config.crates) and _watched_only(config):
+            # Neither feed can filter by the user watchlist in v1.
+            log.warning("HUNTER_WATCH_MODE=watched: the RubyGems and crates.io polls are not started")
+        if config.rubygems and not _watched_only(config):
             polls.append(
                 threading.Thread(
                     target=_feed_loop,
@@ -1917,7 +2013,7 @@ def serve(
                     daemon=True,
                 )
             )
-        if config.crates:
+        if config.crates and not _watched_only(config):
             polls.append(
                 threading.Thread(
                     target=_feed_loop,

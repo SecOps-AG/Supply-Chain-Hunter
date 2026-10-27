@@ -126,6 +126,60 @@ def test_release_detail_has_reports_but_not_webhook_text(db):
     assert dashboard.release(db, "npm", "missing", "1.0.0") is None
 
 
+def test_watched_only_keeps_listed_packages(db):
+    db.replace_user_watch_source("repo/requirements.txt", "requirements", [("pypi", "demo-client", "0.3.0", None)])
+    snap = dashboard.snapshot(db, health={}, models=None, range_name="24h", watched_only=True, watch_mode="watched", alert_scope="watched")
+    assert snap["watched_only"] is True
+    assert snap["scanned"]["by_ecosystem"] == {"pypi": 1}
+    assert snap["scout"]["flagged"] == 1
+    assert snap["triage"]["total"] == 1
+    assert snap["analyst"]["total"] == 0
+    assert snap["webhook"]["alerts_total"] == 0
+    assert snap["watchlist"]["total"] == 1 and snap["watchlist"]["mode"] == "watched"
+    assert [row["source"] for row in snap["watchlist"]["sources"]] == ["repo/requirements.txt"]
+    assert snap["watchlist"]["sources"][0]["stale"] is False
+
+    full = dashboard.snapshot(db, health={}, models=None, range_name="24h")
+    assert full["scanned"]["total"] == 4 and full["watched_only"] is False
+
+    rows = dashboard.findings(db, {"range": "24h", "scope": "flagged", "watched": "1"})["rows"]
+    assert {row["name"] for row in rows} == {"demo-client"}
+    assert len(dashboard.findings(db, {"range": "24h", "scope": "flagged"})["rows"]) == 3
+
+
+def test_release_carries_the_watch_block_only_when_listed(db):
+    assert "watch" not in dashboard.release(db, "pypi", "demo-client", "0.3.0")["release"]
+    db.replace_user_watch_source("repo/requirements.txt", "requirements", [("pypi", "demo-client", "0.3.0", None)])
+    watch = dashboard.release(db, "pypi", "demo-client", "0.3.0")["release"]["watch"]
+    assert watch["exact_match"] and watch["sources"] == ["repo/requirements.txt"]
+
+
+def test_watchlist_api_and_watched_default(db):
+    db.replace_user_watch_source("repo/requirements.txt", "requirements", [("pypi", "demo-client", "0.3.0", None)])
+    server = start_health(Config(bind="127.0.0.1", port=0, watch_mode="watched", alert_scope="watched"), db, time.monotonic())
+    try:
+        port = server.server_address[1]
+        _, _, body = _get(port, "/api/watchlist")
+        payload = json.loads(body)
+        assert payload["pypi"] == 1 and payload["mode"] == "watched"
+        assert payload["sources"][0]["source"] == "repo/requirements.txt"
+        _, _, body = _get(port, "/api/snapshot?range=24h")
+        assert json.loads(body)["scanned"]["total"] == 1
+        _, _, body = _get(port, "/api/snapshot?range=24h&watched=0")
+        assert json.loads(body)["scanned"]["total"] == 4
+        _, _, body = _get(port, "/health")
+        assert json.loads(body)["user_watchlist"]["total"] == 1
+    finally:
+        server.shutdown()
+    guarded = start_health(Config(bind="127.0.0.1", port=0, dashboard_token="t0ken"), db, time.monotonic())
+    try:
+        with pytest.raises(urllib.error.HTTPError) as err:
+            _get(guarded.server_address[1], "/api/watchlist")
+        assert err.value.code == 403
+    finally:
+        guarded.shutdown()
+
+
 def test_static_files_are_an_allow_list():
     assert dashboard.static_file("index.html")[1].startswith("text/html")
     assert dashboard.static_file("app.js")[1].startswith("text/javascript")

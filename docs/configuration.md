@@ -120,6 +120,20 @@ Localhost `/health` adds `dash_last_published_at` and `dash_last_error`.
 
 The PyPI watchlist comes from the top-pypi-packages dataset and the npm one from the download-counts dataset (falling back to the npm search API).
 
+## Your watchlist
+
+The packages your environment uses, imported with `hunter watchlist import`. See [watchlist.md](watchlist.md).
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `HUNTER_WATCH_MODE` | `all` | `all`: the popular lists plus your watchlist (with no watchlist this is the same as before). `watched`: only your watchlist. The npm, PyPI, GitHub Actions and Open VSX polls queue only listed names, the popular lists are not downloaded, no lookalike names are checked, MCP registry names are left out, and the RubyGems and crates.io polls do not start. Any other value stops startup. |
+| `HUNTER_ALERT_SCOPE` | `watched` when the mode is `watched`, else `all` | `watched`: the webhook sends only for listed names. A confirmed release that is not listed is still stored, logged and shown on the local dashboard. The decision-model outage webhook is never scoped. Any other value stops startup. |
+| `HUNTER_WATCHLIST_PATHS` | | Comma-separated files or directories. They are imported again every `HUNTER_WATCHLIST_REFRESH` seconds, each labeled with the path as written here. A file that disappears from a directory drops its rows on the next refresh. |
+| `HUNTER_WATCHLIST_MAX_FILE_MB` | `20` | Largest file read during an import. Larger files are skipped and reported. |
+| `HUNTER_WATCHLIST_MAX_FILES` | `2000` | Most files read in one directory walk. The import is reported as partial when this is reached. |
+
+While a watchlist exists, or the mode is `watched`, the public feed and public dashboard do not publish; `/health` shows `disabled: private watchlist present` as their last error. Localhost `/health` adds a `user_watchlist` block with counts only: names per ecosystem, the number of sources, the mode, the alert scope and the oldest import time. `/api/watchlist` lists the sources, behind the same access check as the rest of the dashboard API.
+
 ## GitHub Actions
 
 How it works: [github-actions.md](github-actions.md).

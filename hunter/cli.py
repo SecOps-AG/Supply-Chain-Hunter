@@ -12,6 +12,7 @@ from hunter.archives import extract_archive
 from hunter.config import Config
 from hunter.db import Database
 from hunter.evaluate import evaluate_fixtures, format_report
+from hunter.inventory.parsers import FORMATS
 from hunter.investigate import warn_smart_config
 from hunter.jev import JevClient
 from hunter.logging_setup import configure_logging
@@ -392,6 +393,131 @@ def _cmd_actions(args, config: Config) -> int:
     return 0
 
 
+def watchlist_warnings(db: Database, config: Config) -> list[str]:
+    """Plain-language problems with the user watchlist setup, for ``watchlist status``."""
+    from hunter.inventory.scope import is_stale
+
+    counts = db.user_watch_counts()
+    found: list[str] = []
+    if config.watch_mode == "watched" and not counts["total"]:
+        found.append("HUNTER_WATCH_MODE=watched but the watchlist is empty: the polls run and queue nothing.")
+    if config.watch_mode == "all" and counts["total"]:
+        found.append(
+            "HUNTER_WATCH_MODE=all: Hunter watches the popular lists as well as your "
+            f"{counts['total']} names, and alert scope is {config.alert_scope}. "
+            "Set HUNTER_WATCH_MODE=watched to poll and alert only on your names."
+        )
+    if counts["github-actions"] and not config.actions:
+        found.append(f"{counts['github-actions']} GitHub Actions are listed but HUNTER_ACTIONS is off; their tags are not polled.")
+    if counts["openvsx"] and not config.openvsx:
+        found.append(f"{counts['openvsx']} Open VSX extensions are listed but HUNTER_OPENVSX is off; they are not polled.")
+    for row in db.user_watch_sources():
+        if is_stale(row["imported_at"]):
+            found.append(f"source {row['source']} was imported more than 7 days ago ({row['imported_at']}); import it again.")
+    return found
+
+
+def _print_import_report(report) -> None:
+    for item in report.files:
+        if item.error:
+            print(f"{item.source}\t-\tnot imported: {item.error}")
+            continue
+        print(f"{item.source}\t{item.format}\t{item.components} components\t{item.skipped} skipped")
+        for warning in item.warnings:
+            print(f"  warning: {warning}")
+    for warning in report.warnings:
+        print(f"warning: {warning}")
+    stored = "nothing stored (dry run)" if report.dry_run else f"{len(report.new_names)} names new to the poll set"
+    partial = "; partial" if report.partial else ""
+    print(f"{report.components} components from {len([f for f in report.files if not f.error])} files; {stored}{partial}")
+
+
+def _cmd_watchlist(args, config: Config) -> int:
+    """User watchlist: import lockfiles, SBOMs, manifests and workflows, or edit the list by hand."""
+    from hunter.inventory import ECOSYSTEMS, component, ecosystem_alias, normalize
+    from hunter.inventory.load import import_paths, prime_new_names
+    from hunter.inventory.parsers import FORMAT_HELP
+    from hunter.inventory.scope import is_stale
+
+    command = args.watchlist_command
+    if command == "formats":
+        for fmt, text in FORMAT_HELP.items():
+            print(f"{fmt}\t{text}")
+        return 0
+    if command == "import" and "-" in args.paths and not args.format:
+        print("reading stdin (-) needs --format; see 'hunter watchlist formats'", file=sys.stderr)
+        return 2
+    eco = None
+    if getattr(args, "ecosystem", None):
+        eco = ecosystem_alias(args.ecosystem)
+        if eco is None:
+            print(f"unknown ecosystem {args.ecosystem!r}; use one of {', '.join(ECOSYSTEMS)}", file=sys.stderr)
+            return 2
+    db = Database(config.db_path)
+    try:
+        if command == "import":
+            report = import_paths(
+                db,
+                args.paths,
+                source=args.source,
+                fmt=args.format,
+                dry_run=args.dry_run,
+                max_bytes=config.watchlist_max_file_bytes,
+                max_files=config.watchlist_max_files,
+            )
+            if args.json:
+                json.dump(report.to_dict(), sys.stdout, indent=2, sort_keys=True)
+                sys.stdout.write("\n")
+            else:
+                _print_import_report(report)
+            return 0 if any(not item.error for item in report.files) else 1
+        if command == "add":
+            found = component(eco, args.name, args.version or "", 1)
+            if found is None:
+                print(f"{args.name!r} is not a valid {eco} name", file=sys.stderr)
+                return 2
+            if db.add_user_watch(found.ecosystem, found.name, found.version, source="manual"):
+                prime_new_names(db, [(found.ecosystem, found.name)])
+            print(f"added {found.ecosystem} {found.name} {found.version or '(any version)'} to source manual")
+            return 0
+        if command == "remove":
+            if args.source and not args.target:
+                removed = db.remove_user_watch_source(args.source)
+            elif len(args.target) == 2 and not args.source:
+                target_eco = ecosystem_alias(args.target[0])
+                name = normalize(target_eco, args.target[1]) if target_eco else None
+                if name is None:
+                    print("remove needs a known ecosystem and a valid name", file=sys.stderr)
+                    return 2
+                removed = db.remove_user_watch_name(target_eco, name)
+            else:
+                print("remove needs --source LABEL, or ECOSYSTEM NAME", file=sys.stderr)
+                return 2
+            print(f"removed {removed} rows")
+            return 0
+        if command == "list":
+            rows = db.user_watch_rows(eco)
+            if args.json:
+                json.dump(rows, sys.stdout, indent=2, sort_keys=True)
+                sys.stdout.write("\n")
+            else:
+                for row in rows:
+                    direct = {1: "direct", 0: "indirect"}.get(row["direct"], "-")
+                    print(f"{row['ecosystem']}\t{row['name']}\t{row['version'] or '-'}\t{direct}\t{row['source']}")
+            return 0
+        counts = db.user_watch_counts()
+        print(f"mode {config.watch_mode}, alert scope {config.alert_scope}")
+        print(" ".join(f"{key} {counts[key]}" for key in (*ECOSYSTEMS, "total")))
+        for row in db.user_watch_sources():
+            stale = " (stale)" if is_stale(row["imported_at"]) else ""
+            print(f"{row['source']}\t{row['format']}\t{row['components']} components\t{row['imported_at']}{stale}")
+        for warning in watchlist_warnings(db, config):
+            print(f"warning: {warning}")
+    finally:
+        db.close()
+    return 0
+
+
 def _cmd_ground_truth(args, config: Config) -> int:
     """Compare scored releases with OSV MAL- records and npm takedowns. Reads JSON only."""
     from hunter.ground_truth import make_source, run_ground_truth
@@ -531,6 +657,38 @@ def build_parser() -> argparse.ArgumentParser:
     actions_sub.add_parser("status", help="print watched actions, recorded tags, and tag events today").set_defaults(
         func=_cmd_actions
     )
+
+    watchlist = sub.add_parser(
+        "watchlist",
+        help="your watchlist: import lockfiles, SBOMs, manifests and workflows; add, remove, list, status",
+    )
+    watchlist_sub = watchlist.add_subparsers(dest="watchlist_command", required=True)
+    wl_import = watchlist_sub.add_parser(
+        "import", help="read files or directories (walked) and store the packages they list; nothing is run"
+    )
+    wl_import.add_argument("paths", nargs="+", metavar="PATH", help="file, directory, or - for stdin (needs --format)")
+    wl_import.add_argument("--source", default=None, help="label prefix; each file is stored as LABEL/<relative path>")
+    wl_import.add_argument("--format", choices=FORMATS, default=None, help="skip detection and read every file as this format")
+    wl_import.add_argument("--dry-run", action="store_true", help="report what would be stored; write nothing")
+    wl_import.add_argument("--json", action="store_true")
+    wl_import.set_defaults(func=_cmd_watchlist)
+    wl_add = watchlist_sub.add_parser("add", help="add one package by hand (source 'manual')")
+    wl_add.add_argument("ecosystem", help="npm, pypi, github-actions or openvsx")
+    wl_add.add_argument("name")
+    wl_add.add_argument("version", nargs="?", default="")
+    wl_add.set_defaults(func=_cmd_watchlist)
+    wl_remove = watchlist_sub.add_parser("remove", help="remove a whole source, or one package from every source")
+    wl_remove.add_argument("--source", default=None)
+    wl_remove.add_argument("target", nargs="*", metavar="ECOSYSTEM NAME")
+    wl_remove.set_defaults(func=_cmd_watchlist)
+    wl_list = watchlist_sub.add_parser("list", help="print every listed package")
+    wl_list.add_argument("--ecosystem", default=None)
+    wl_list.add_argument("--json", action="store_true")
+    wl_list.set_defaults(func=_cmd_watchlist)
+    watchlist_sub.add_parser("status", help="print the mode, alert scope, counts, sources and warnings").set_defaults(
+        func=_cmd_watchlist
+    )
+    watchlist_sub.add_parser("formats", help="print the formats import understands").set_defaults(func=_cmd_watchlist)
 
     truth = sub.add_parser(
         "ground-truth",

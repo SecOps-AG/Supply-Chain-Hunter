@@ -18,6 +18,7 @@ from hunter.config import Config, active_role_models
 from hunter.dashboard import RANGES, _since, _triage_verdict, findings, release, release_key, snapshot
 from hunter.dashboard.benchmark import load_benchmarks
 from hunter.db import Database, iso, utcnow
+from hunter.inventory.scope import public_publish_blocked
 from hunter.public_feed import (
     DASH_JSON_CONTENT_TYPE,
     LIVE_PREFIX,
@@ -148,23 +149,24 @@ class _CycleReader:
     def __init__(self, db: Database, *, widest_since: str) -> None:
         self._db = db
         self._widest_since = widest_since
-        self._rows: dict[str, list[dict]] = {}
+        self._rows: dict[tuple, list[dict]] = {}
         self._memo: dict[tuple, Any] = {}
 
     def __getattr__(self, name: str) -> Any:
         target = getattr(self._db, name)
         if name in self._PREFIX_QUERIES:
-            return lambda since, limit=self._PREFIX_LIMIT: self._prefix(name, target, since, limit)
+            return lambda since, limit=self._PREFIX_LIMIT, **kwargs: self._prefix(name, target, since, limit, kwargs)
         if name in self._MEMO_QUERIES:
             return lambda *args: self._memoized(name, target, args)
         return target
 
-    def _prefix(self, name: str, target, since: str, limit: int) -> list[dict]:
+    def _prefix(self, name: str, target, since: str, limit: int, kwargs: dict) -> list[dict]:
         if limit != self._PREFIX_LIMIT or since < self._widest_since:
-            return target(since, limit)
-        if name not in self._rows:
-            self._rows[name] = target(self._widest_since, self._PREFIX_LIMIT)
-        return [dict(row) for row in self._rows[name] if str(row["created_at"]) >= since]
+            return target(since, limit, **kwargs)
+        key = (name, tuple(sorted(kwargs.items())))
+        if key not in self._rows:
+            self._rows[key] = target(self._widest_since, self._PREFIX_LIMIT, **kwargs)
+        return [dict(row) for row in self._rows[key] if str(row["created_at"]) >= since]
 
     def _memoized(self, name: str, target, args: tuple) -> Any:
         key = (name, args)
@@ -197,6 +199,8 @@ def public_release(detail: dict[str, Any]) -> dict[str, Any]:
     summary = out.get("release")
     if isinstance(summary, dict):
         summary.pop("scout_model_id", None)
+        # The user watchlist never leaves the machine (publishing is also refused while one exists).
+        summary.pop("watch", None)
     return out
 
 
@@ -572,6 +576,13 @@ def publish_public_dash(
     now: datetime | None = None,
 ) -> bool:
     if not config.dash_configured():
+        return False
+    blocked = public_publish_blocked(db, config)
+    if blocked:
+        # A user watchlist is private. The error shows on local /health; it is stored once, not every pass.
+        state = db.public_dash_state()
+        if state is None or state["last_error"] != blocked:
+            db.mark_public_dash_error(blocked)
         return False
     now = now or utcnow()
     today = now.strftime("%Y-%m-%d")
