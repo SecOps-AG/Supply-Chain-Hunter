@@ -27,5 +27,13 @@ jobs:
       - name: Compile check
         run: python -m compileall -q hunter tests
 
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+
+      - name: JavaScript syntax check
+        run: node --check hunter/dashboard/static/app.js
+
       - name: Run the test suite
         run: pytest
