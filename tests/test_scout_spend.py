@@ -195,8 +195,15 @@ def test_a_stopped_cap_defers_the_release_on_shutdown(db):
     new = {"index.js": "require('child_process').execSync('id');\n"}
     result = classify_files(meta=_meta(), old_files=old, new_files=new, jev=client)
     assert sdk.calls == 0
-    assert result.band == "deferred"
+    # The free checks flag it (rules-only, not model-reviewed) and it stays queued for Scout.
+    assert "rules_only" in result.signals
     assert classification_incomplete(result) is True
+    quiet = classify_files(
+        meta=_meta(), old_files=old, new_files={"index.js": "module.exports = 2;\n"}, jev=client
+    )
+    assert sdk.calls == 0
+    assert quiet.band == "deferred"
+    assert classification_incomplete(quiet) is True
 
 
 def test_health_reports_spend(db):
