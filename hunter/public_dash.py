@@ -35,6 +35,12 @@ BENCHMARK_KEY = f"{LIVE_PREFIX}benchmark.json"
 FINDINGS_EXPORT_LIMIT = 5000
 # Per-request connect/read timeout for each R2 PUT.
 UPLOAD_TIMEOUT_S = 5.0
+# One publish pass stops starting new release uploads after this long. The
+# rest stay dirty and go up on the next pass, so the first pass after a deploy
+# (every release body changed) cannot hold the publisher thread for minutes.
+# A PUT already started can still run up to its own timeout and retry.
+PUBLISH_BUDGET_S = 20.0
+_clock = time.monotonic
 DEBOUNCE_S = 2.0
 CACHE_LIVE = "public, max-age=2"
 CACHE_TODAY = "public, max-age=60"
@@ -635,13 +641,17 @@ def publish_public_dash(
 
         # Each hash is stored only after its own objects are on R2, so a
         # failed or timed-out PUT is retried on the next pass.
+        began = _clock()
         if live_uploads:
             _upload_objects(uploader, bucket, live_uploads)
             db.mark_public_dash_live_published(live_digest, when=now)
         if bench_changed:
             _upload_objects(uploader, bucket, [(BENCHMARK_KEY, _encode(benchmark), CACHE_TODAY)])
             db.mark_public_dash_benchmark_published(bench_digest, when=now)
-        for key, obj_key, digest, body in release_uploads:
+        for done, (key, obj_key, digest, body) in enumerate(release_uploads):
+            if done and _clock() - began >= PUBLISH_BUDGET_S:
+                log.info("public dashboard: %d release objects left for the next pass", len(release_uploads) - done)
+                break
             _upload_objects(uploader, bucket, [(obj_key, body, CACHE_RELEASE)])
             db.mark_public_dash_release(key, digest)
             db.clear_public_dash_dirty({key: to_check[key]})

@@ -607,3 +607,38 @@ def test_watched_mode_blocks_the_public_dashboard(db):
     config = _dash_config(watch_mode="watched")
     assert publish_public_dash(db, config, started=time.monotonic(), meter=None, client=client, now=utcnow()) is False
     assert client.put_object.call_count == 0
+
+
+def test_release_uploads_stop_at_the_pass_budget_and_resume_next_pass(db, monkeypatch):
+    import hunter.public_dash as public_dash
+
+    config = _dash_config()
+    clock = [1000.0]
+    monkeypatch.setattr(public_dash, "_clock", lambda: clock[0], raising=False)
+    monkeypatch.setattr(public_dash, "PUBLISH_BUDGET_S", 20.0, raising=False)
+    client = MagicMock()
+
+    def put_object(**kwargs):
+        if kwargs["Key"].startswith("live/r/"):
+            clock[0] += 30.0  # one slow PUT uses up the whole pass budget
+
+    client.put_object.side_effect = put_object
+    moment = utcnow()
+    started = time.monotonic()
+
+    def release_puts():
+        return [c.kwargs["Key"] for c in client.put_object.call_args_list if c.kwargs["Key"].startswith("live/r/")]
+
+    publish_public_dash(db, config, started=started, meter=None, client=client, now=moment)
+    first = release_puts()
+    assert len(first) == 1
+    seen = list(first)
+    for _ in range(20):
+        client.put_object.reset_mock()
+        publish_public_dash(db, config, started=started, meter=None, client=client, now=moment)
+        batch = release_puts()
+        if not batch:
+            break
+        assert len(batch) == 1
+        seen.extend(batch)
+    assert len(seen) == len(set(seen)) >= 2
