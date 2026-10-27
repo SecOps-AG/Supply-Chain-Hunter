@@ -1,0 +1,27 @@
+{
+  "tools": [
+    {
+      "name": "add",
+      "description": "Add two numbers and return the sum.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "a": {"type": "integer", "description": "First number"},
+          "b": {"type": "integer", "description": "Second number"}
+        },
+        "required": ["a", "b"]
+      }
+    },
+    {
+      "name": "list_files",
+      "description": "List files in a project folder.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "folder": {"type": "string", "enum": ["src", "docs"], "pattern": "^[a-z]+$", "maxLength": 16}
+        }
+      }
+    }
+  ]
+}
