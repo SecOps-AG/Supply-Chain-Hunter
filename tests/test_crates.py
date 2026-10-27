@@ -26,6 +26,7 @@ from hunter.crates.feed import (
 from hunter.crates.review import (
     classify_crate,
     crate_signals,
+    dl_template,
     predecessor,
     review_trees,
 )
@@ -632,6 +633,54 @@ def test_scout_is_passed_only_when_a_weak_hit_and_the_flag_allow_it(monkeypatch)
     assert loud.band == "review"
     assert loud.needs_llm_review is True
     assert loud.jev_model_id == "fake"
+
+
+def test_dl_template_failure_then_recovery(tmp_path):
+    from hunter.crates import review as review_mod
+
+    config = _config(tmp_path)
+    fallback = f"{STATIC}/crates/{{crate}}/{{crate}}-{{version}}.crate"
+    template = "https://cdn.test/{crate}/{version}/download"
+    responses: list[object] = [
+        TimeoutError("index down"),
+        json.dumps({"dl": ""}).encode(),
+        json.dumps({"dl": template}).encode(),
+    ]
+    seen: list[str] = []
+
+    def transport(url: str, timeout: float = 60) -> bytes:
+        seen.append(url)
+        item = responses.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    assert dl_template(config, transport) == fallback
+    assert INDEX not in review_mod._templates
+    assert dl_template(config, transport) == fallback
+    assert INDEX not in review_mod._templates
+    assert dl_template(config, transport) == template
+    assert review_mod._templates[INDEX] == template
+    assert dl_template(config, transport) == template
+    assert seen == [f"{INDEX}/config.json"] * 3
+    assert responses == []
+
+
+def test_dl_template_success_is_cached(tmp_path):
+    from hunter.crates import review as review_mod
+
+    config = _config(tmp_path)
+    template = "https://cdn.test/crates/{crate}/{crate}-{version}.crate"
+    seen: list[str] = []
+
+    def transport(url: str, timeout: float = 60) -> bytes:
+        seen.append(url)
+        return json.dumps({"dl": template}).encode()
+
+    assert dl_template(config, transport) == template
+    assert dl_template(config, transport) == template
+    assert seen == [f"{INDEX}/config.json"]
+    assert review_mod._templates[INDEX] == template
 
 
 def _classify_routes(name: str, version: str, lines: list[dict], files: dict[str, bytes]) -> dict[str, bytes]:
