@@ -108,6 +108,10 @@ If Scout didn't read the whole release, both prompts start with a note saying wh
 
 You can replace either model with your own command (`HUNTER_INVESTIGATE_COMMAND`, `HUNTER_ANALYST_COMMAND`), or turn the Analyst off (`HUNTER_ANALYST=0`) so Triage alone decides.
 
+## Risk score
+
+Every stored release also gets a `risk_score` (0-100) and a `risk_why` list of up to three reasons, each with `code`, `points` and a short fixed `text`. The score adds up the signals and rule hits the release already carries, so it needs no extra model call. It is for reading, not routing: it does not change a band, a probability or an alert. A release that could not be read fully (download failed or deferred) has a null score, which means unknown, not safe. Older stored rows have no score. The dashboard shows it in the release pop-out.
+
 ## Lessons
 
 Hunter can learn from releases that Triage keeps clearing.

@@ -88,6 +88,24 @@ def _signals(payload: dict) -> list[str]:
     return [str(item)[:200] for item in raw]
 
 
+def _risk(payload: dict) -> tuple[int | None, list[dict]]:
+    raw = payload.get("risk_score")
+    score = raw if isinstance(raw, int) and not isinstance(raw, bool) else None
+    why = payload.get("risk_why")
+    if not isinstance(why, list):
+        return score, []
+    shown = [
+        {
+            "code": str(item.get("code", ""))[:100],
+            "points": item["points"] if isinstance(item.get("points"), int) else 0,
+            "text": str(item.get("text", ""))[:200],
+        }
+        for item in why[:5]
+        if isinstance(item, dict)
+    ]
+    return score, shown
+
+
 def _rule_ids(payload: dict) -> list[str]:
     hits = payload.get("rule_hits")
     if not isinstance(hits, list):
@@ -115,6 +133,7 @@ def _stage_status(row: dict | None) -> str | None:
 def _release_summary(row: dict) -> dict:
     payload = _payload(row.get("payload_json"))
     signals = _signals(payload)
+    risk_score, risk_why = _risk(payload)
     return {
         "key": release_key(row["ecosystem"], row["name"], row["version"]),
         "ecosystem": row["ecosystem"],
@@ -127,6 +146,8 @@ def _release_summary(row: dict) -> dict:
         "subtype": row.get("subtype"),
         "created_at": row.get("created_at"),
         "signals": signals[:MAX_SIGNALS],
+        "risk_score": risk_score,
+        "risk_why": risk_why,
         "rules": _rule_ids(payload),
         "rule_verdict": payload.get("rule_verdict") if isinstance(payload.get("rule_verdict"), str) else None,
         "partial_reasons": partial_read_reasons(signals),
