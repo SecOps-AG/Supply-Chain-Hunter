@@ -44,9 +44,18 @@ from hunter.archives import (
     unpack_file,
 )
 from hunter.children import apply_children, inspect_children
-from hunter.classify import MODEL_DOWN_SIGNAL, classification_incomplete, classify_files, decision_model_failed
+from hunter.classify import (
+    MODEL_DOWN_SIGNAL,
+    RULES_ONLY_SIGNAL,
+    SPEND_STOP_REASON,
+    classification_incomplete,
+    classify_files,
+    decision_model_failed,
+)
 from hunter.features import phantom_runtime_dependencies
 from hunter.investigate import (
+    _alert_in_scope,
+    _watch_context,
     drain_investigations,
     drain_analyst,
     enqueue_investigation,
@@ -93,7 +102,7 @@ from hunter.takeover import ECOSYSTEMS as TAKEOVER_ECOSYSTEMS, score_pending_job
 from hunter.typosquat import TYPOSQUAT_QUEUE_LIMIT, NameIndex, typosquat_pairs
 from hunter.registry import parse_time
 from hunter.public_feed import publish_public_feed
-from hunter.webhook import build_payload, drain_outbox, dump_body, enqueue_decision_model_down
+from hunter.webhook import build_payload, drain_outbox, dump_body, enqueue_decision_model_down, enqueue_rules_only_alert
 
 log = logging.getLogger("hunter.service")
 
@@ -317,6 +326,33 @@ def _release_needs_retry(row) -> bool:
     return "ai_incomplete" in payload or "jev_retry" in payload
 
 
+def _retry_limit(config: Config, reason: str) -> int:
+    """A paused Scout is not a failed attempt: those releases keep waiting instead of running out of tries."""
+    return 1_000_000 if reason == SPEND_STOP_REASON else config.ai_max_attempts
+
+
+def _rules_only_alert(db: Database, config: Config, result: Classification) -> None:
+    """Send the labelled rules-only alert for a watched release read while Scout is paused."""
+    if RULES_ONLY_SIGNAL not in result.signals or not config.webhook_url:
+        return
+    evidence = {"ecosystem": result.ecosystem, "package": result.name, "new_version": result.new_version}
+    if not _alert_in_scope(db, config, evidence):
+        return
+    watch = _watch_context(db, evidence)
+    if watch is None:
+        return
+    enqueue_rules_only_alert(
+        db,
+        result,
+        webhook_format=config.webhook_format,
+        webhook_url=config.webhook_url,
+        watch=watch,
+    )
+    log.warning(
+        "rules-only alert queued for %s/%s %s (Scout paused)", result.ecosystem, result.name, result.new_version
+    )
+
+
 def _download_failure(exc: BaseException) -> bool:
     """True when the release body never arrived intact.
 
@@ -503,8 +539,9 @@ def _classify_reviewed_job(db: Database, config: Config, job, *, review) -> None
         if classification_incomplete(result):
             reason = _retry_reason(result)
             db.note_classify_failure(
-                ecosystem, name, version, rank, reason, reason=reason, max_attempts=config.ai_max_attempts
+                ecosystem, name, version, rank, reason, reason=reason, max_attempts=_retry_limit(config, reason)
             )
+            _rules_only_alert(db, config, result)
         else:
             db.clear_classify_retry(ecosystem, name, version)
             if smart_analysis_enabled(config):
@@ -603,8 +640,9 @@ def classify_job(db: Database, config: Config, job, *, jev, loader: ReleaseLoade
                 rank,
                 reason,
                 reason=reason,
-                max_attempts=config.ai_max_attempts,
+                max_attempts=_retry_limit(config, reason),
             )
+            _rules_only_alert(db, config, result)
         else:
             db.clear_classify_retry(ecosystem, name, version)
             if smart_analysis_enabled(config):

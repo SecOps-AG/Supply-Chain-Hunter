@@ -678,6 +678,44 @@ MODEL_DOWN_SIGNAL = "decision_model_down"
 # Scout failed and a promoted rule hit, so the release went to Triage and Analyst instead of a retry.
 RULE_FALLBACK_SIGNAL = "jev_failed_rule_fallback"
 SPEND_STOP_REASON = "spend_cap_reached"
+# Scout is paused, so only the free rule and feature checks read this release. Not model-reviewed.
+RULES_ONLY_SIGNAL = "rules_only"
+RULES_ONLY_MODEL_ID = "rules-only"
+
+
+def scout_paused(jev) -> bool:
+    """True when the spend meter on this Scout client holds a stop. Reads the database only; no model call."""
+    meter = getattr(jev, "meter", None)
+    if meter is None:
+        return False
+    try:
+        return bool(meter.stopped())
+    except Exception:
+        log.exception("could not read the Scout spend stop; treating Scout as running")
+        return False
+
+
+def _rules_only(meta: ReleaseMeta, code: CodeFeatures, report: RuleReport | None, head) -> Classification:
+    """Row for a release read while Scout is paused: the free checks only, no model call.
+
+    A hit keeps its place in the queue (it is incomplete, so Scout rereads it when it runs again).
+    A release with no hit stays deferred and posts nothing.
+    """
+    floor = _apply_score_floors(code, 0.0, head)
+    malicious = report is not None and report.verdict == "malicious"
+    if not (malicious or floor >= REVIEW_THRESHOLD or code.static_hot()):
+        return _deferred(meta, code, JEV_MODEL_ID, SPEND_STOP_REASON)
+    probability = round(max(floor, REVIEW_THRESHOLD), 4)
+    row = _blank(
+        meta,
+        band=decide_band(probability, reviewer_noul=0.0),
+        probability=probability,
+        model_id=RULES_ONLY_MODEL_ID,
+        signals=code.signal_list() + [RULES_ONLY_SIGNAL, "ai_incomplete", "jev_retry", SPEND_STOP_REASON],
+    )
+    row.defer_reason = SPEND_STOP_REASON
+    row.needs_llm_review = False
+    return row
 
 
 def _route_overflow(row, meta, jev, old_files, new_files, popular_names, report, known_diffs):
@@ -791,6 +829,8 @@ def _classify_aligned(
     hidden = {path: [] for path in report.hits_by_path()} if report is not None else None
     manifest = changed_file_manifest(old_files, new_files, force_keep=hidden)
     model_id = getattr(jev, "fallback_model_id", None) or JEV_MODEL_ID
+    if scout_paused(jev):
+        return _rules_only(meta, code, report, head)
     if _text_was_cut(old_files) or _text_was_cut(new_files):
         return _unread_partial(meta, code, model_id, head)
     if (

@@ -455,6 +455,77 @@ def enqueue_analysis(
     return db.enqueue(payload["idempotency_key"], body, when=when)
 
 
+RULES_ONLY_LABEL = "rules-only"
+
+
+def rules_only_idempotency_key(ecosystem: str, name: str, version: str) -> str:
+    return f"{ecosystem}:{name}:{version}:rules-only"
+
+
+def build_rules_only_payload(result: Classification, *, when: datetime | None = None, watch: dict | None = None) -> dict:
+    payload = {
+        "kind": "rules_only_alert",
+        "idempotency_key": rules_only_idempotency_key(result.ecosystem, result.name, result.new_version),
+        "timestamp": iso(when or utcnow()),
+        "label": RULES_ONLY_LABEL,
+        "model_reviewed": False,
+        "notice": "Rules-only alert: Scout (the decision model) is paused, so no model reviewed this release.",
+        "ecosystem": result.ecosystem,
+        "package": result.name,
+        "old_version": result.old_version,
+        "new_version": result.new_version,
+        "registry_url": result.registry_url,
+        "band": result.band,
+        "signals": list(result.signals),
+        "rule_verdict": result.rule_verdict,
+        "rule_hits": [dict(hit) for hit in result.rule_hits[:5]],
+    }
+    top_rule = top_strong_rule(result.rule_hits)
+    if top_rule:
+        payload["top_rule"] = top_rule
+    if watch:
+        payload["watch"] = dict(watch)
+    return payload
+
+
+def slack_rules_only_text(payload: dict) -> str:
+    lines = [
+        (
+            f"RULES-ONLY alert (not model-reviewed) "
+            f"{payload.get('ecosystem')}/{payload.get('package')} {payload.get('new_version')}"
+        ),
+        "Scout is paused (spend cap). Only the free rule checks ran; no model has reviewed this release.",
+    ]
+    watched = watch_line(payload.get("watch"))
+    if watched:
+        lines.append(watched)
+    lines.append(str(payload.get("registry_url") or ""))
+    if payload.get("top_rule"):
+        lines.append(f"rule {payload.get('top_rule')}")
+    signals = ", ".join(str(item) for item in (payload.get("signals") or []))
+    if signals:
+        lines.append(signals)
+    return clip_text("\n".join(lines))
+
+
+def enqueue_rules_only_alert(
+    db: Database,
+    result: Classification,
+    *,
+    webhook_format: str = "json",
+    webhook_url: str = "",
+    when: datetime | None = None,
+    watch: dict | None = None,
+) -> bool:
+    """Early warning from the free rule checks while Scout is paused. Labelled rules-only, never model-reviewed."""
+    payload = build_rules_only_payload(result, when=when, watch=watch)
+    if delivery_format(webhook_format, webhook_url) == "slack":
+        body = slack_body(slack_rules_only_text(payload))
+    else:
+        body = dump_body(payload).decode("utf-8")
+    return db.enqueue(payload["idempotency_key"], body, when=when)
+
+
 def enqueue_decision_model_down(
     db: Database,
     *,
