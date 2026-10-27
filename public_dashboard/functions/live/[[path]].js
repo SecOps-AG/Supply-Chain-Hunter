@@ -4,14 +4,14 @@
  * Replace with custom domain + Cache Rules when a domain is attached.
  *
  * The allowlist matches hunter.public_feed.allowed_public_object_key for live/
- * objects (npm, pypi, github-actions, openvsx). Feed keys are not served here.
+ * objects (npm, pypi, github-actions, openvsx, rubygems, crates). Feed keys are not served here.
  * A slash in a release name is a ~ in the path, never %2F. @ in a version is %40.
  * ! ' ( ) * are percent-encoded the same way as urllib.parse.quote.
  */
 
 // Full object key (live/<rel>). Same shape as allowed_public_object_key, without feed.json.
 const LIVE_KEY_RE =
-  /^live\/(?:live\.json|benchmark\.json|history\/\d{4}-\d{2}-\d{2}\.json|confirmed\/\d{4}-\d{2}-\d{2}\.json|r\/(?:npm|pypi|github-actions|openvsx)\/[^/]+\/[^/]+\.json)$/;
+  /^live\/(?:live\.json|benchmark\.json|history\/\d{4}-\d{2}-\d{2}\.json|confirmed\/\d{4}-\d{2}-\d{2}\.json|r\/(?:npm|pypi|github-actions|openvsx|rubygems|crates)\/[^/]+\/[^/]+\.json)$/;
 
 const DEFAULT_CC = "public, max-age=2";
 
