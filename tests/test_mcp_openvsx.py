@@ -331,6 +331,8 @@ def test_a_new_name_queues_only_the_newest_release_inside_the_lookback(tmp_path,
             return json.dumps(project).encode()
         raise AssertionError(url)
 
+    # A poll already ran, so names this poll adds are new.
+    db.set_checkpoint("mcp", "2026-10-26T10:55:00Z")
     stats = poll_mcp_and_catchup(db, config, transport)
     assert stats["added"] == 2
     assert sorted((job["ecosystem"], job["name"], job["version"], job["rank"]) for job in db.pending_jobs()) == [
@@ -366,6 +368,7 @@ def test_a_failed_catchup_keeps_the_checkpoint_and_retries(tmp_path, monkeypatch
             raise FeedError("npm down")
         return json.dumps({"time": {"1.2.0": "2026-10-26T11:00:00.000Z"}}).encode()
 
+    db.set_checkpoint("mcp", "2026-10-26T10:55:00Z")
     poll_mcp_and_catchup(db, config, transport)
     assert db.get_checkpoint("mcp") == "2026-10-26T11:55:00Z"
     assert db.pending_jobs() == []

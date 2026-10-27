@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from hunter.db import Database, iso, utcnow
+from hunter.inventory.scope import is_stale, watch_context
 from hunter.webhook import parse_verdict, partial_read_reasons
 
 STATIC_DIR = Path(__file__).with_name("static")
@@ -169,6 +170,37 @@ def _join(flagged: list[dict], triage: list[dict], analyst: list[dict], outbox: 
     return joined
 
 
+def _listed_rows(rows: list[dict], listed: set[tuple[str, str]]) -> list[dict]:
+    """Rows whose ``eco:name:version`` key names a package on the user watchlist."""
+    kept = []
+    for row in rows:
+        ecosystem, _sep, rest = str(row.get("idempotency_key") or "").partition(":")
+        name, _sep, _version = rest.partition(":")
+        if (ecosystem, name) in listed:
+            kept.append(row)
+    return kept
+
+
+def _listed_pairs(db: Database) -> set[tuple[str, str]]:
+    return {(row["ecosystem"], row["name"]) for row in db.user_watch_rows()}
+
+
+def watchlist_summary(db: Database, *, mode: str = "all", scope: str = "all", now: datetime | None = None) -> dict:
+    """Counts and sources of the user watchlist, with a stale flag per source. No names."""
+    moment = now or utcnow()
+    sources = [
+        {**row, "stale": is_stale(row.get("imported_at"), moment)} for row in db.user_watch_sources()
+    ]
+    counts = db.user_watch_counts()
+    counts.pop("sources", None)
+    return {
+        **counts,
+        "mode": mode,
+        "alert_scope": scope,
+        "sources": sources,
+    }
+
+
 def _stage_reached(item: dict) -> str:
     if item.get("alert_status") == "sent":
         return "webhook"
@@ -187,15 +219,18 @@ def snapshot(
     range_name: str | None = None,
     now: datetime | None = None,
     rules_enabled: bool | None = None,
+    watched_only: bool = False,
+    watch_mode: str = "all",
+    alert_scope: str = "all",
 ) -> dict:
-    """Everything the Dashboard tab needs for one range."""
+    """Everything the Dashboard tab needs for one range. ``watched_only`` keeps user-watchlist packages only."""
     now = now or utcnow()
     key = range_key(range_name)
     seconds, width, step = RANGES[key]
     since = _since(now, key)
     labels = _bucket_labels(now, key)
 
-    buckets = db.release_bucket_counts(since, width)
+    buckets = db.release_bucket_counts(since, width, watched_only=watched_only)
     per_eco: dict[str, list[int]] = {}
     band_totals: Counter = Counter()
     eco_totals: Counter = Counter()
@@ -206,10 +241,15 @@ def snapshot(
         band_totals[row["band"] or "unknown"] += int(row["n"])
         eco_totals[row["ecosystem"]] += int(row["n"])
 
-    flagged = db.flagged_releases_since(since)
+    flagged = db.flagged_releases_since(since, watched_only=watched_only)
     triage = db.investigations_since(since)
     analyst = db.analyst_reviews_since(since)
     outbox = db.outbox_since(since)
+    if watched_only:
+        listed = _listed_pairs(db)
+        triage = _listed_rows(triage, listed)
+        analyst = _listed_rows(analyst, listed)
+        outbox = _listed_rows(outbox, listed)
     joined = _join(flagged, triage, analyst, outbox)
 
     signal_counts: Counter = Counter()
@@ -261,6 +301,8 @@ def snapshot(
         "generated_at": iso(now),
         "range": key,
         "since": since,
+        "watched_only": watched_only,
+        "watchlist": watchlist_summary(db, mode=watch_mode, scope=alert_scope, now=now),
         "bucket_seconds": step,
         "buckets": labels,
         "health": health,
@@ -351,12 +393,16 @@ def findings(db: Database, params: dict[str, str], *, now: datetime | None = Non
     now = now or utcnow()
     key = range_key(params.get("range"))
     since = _since(now, key)
-    joined = _join(
-        db.flagged_releases_since(since),
-        db.investigations_since(since),
-        db.analyst_reviews_since(since),
-        db.outbox_since(since),
-    )
+    watched_only = params.get("watched") == "1"
+    triage = db.investigations_since(since)
+    analyst = db.analyst_reviews_since(since)
+    outbox = db.outbox_since(since)
+    if watched_only:
+        listed = _listed_pairs(db)
+        triage = _listed_rows(triage, listed)
+        analyst = _listed_rows(analyst, listed)
+        outbox = _listed_rows(outbox, listed)
+    joined = _join(db.flagged_releases_since(since, watched_only=watched_only), triage, analyst, outbox)
     scope = params.get("scope") or "triage"
     if scope == "triage":
         joined = [item for item in joined if item["triage_status"]]
@@ -444,6 +490,9 @@ def release(db: Database, ecosystem: str, name: str, version: str) -> dict | Non
     summary["scout_model_id"] = payload.get("jev_model_id") if isinstance(payload.get("jev_model_id"), str) else None
     triage = detail["triage"]
     analyst = detail["analyst"]
+    watch = watch_context(db, ecosystem, name, version)
+    if watch is not None:
+        summary["watch"] = watch
     return {
         "release": summary,
         "triage": None

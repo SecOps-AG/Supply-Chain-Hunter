@@ -177,6 +177,7 @@ def build_analysis_payload(
     triage_model_id: str | None = None,
     triage_verdict: str | None = None,
     analyst_model_id: str | None = None,
+    watch: dict | None = None,
 ) -> dict:
     moment = when or utcnow()
     ecosystem = str(evidence.get("ecosystem") or "")
@@ -216,6 +217,8 @@ def build_analysis_payload(
     action = evidence.get("action")
     if isinstance(action, dict) and action:
         payload["action"] = dict(action)
+    if watch:
+        payload["watch"] = dict(watch)
     return payload
 
 
@@ -333,6 +336,21 @@ def slack_text(payload: dict) -> str:
     return clip_text("\n".join(lines))
 
 
+def watch_line(watch: dict | None) -> str:
+    """One line on how the user's imported files list this package. Empty when it is not listed."""
+    if not isinstance(watch, dict) or not watch.get("listed"):
+        return ""
+    head = "On your watchlist (direct)." if watch.get("direct") else "On your watchlist."
+    pinned = [str(item) for item in (watch.get("pinned_versions") or [])]
+    if watch.get("tag_ref"):
+        return f"{head} Your files use this tag, which pointed at this commit."
+    if watch.get("exact_match"):
+        return f"{head} Your files pin this exact version."
+    if pinned:
+        return f"{head} Your files list this package at: {', '.join(pinned)} (not this version)."
+    return f"{head} Your files list a range or no version."
+
+
 def slack_analysis_text(payload: dict) -> str:
     verdict = payload.get("verdict") or "unknown"
     lines = [
@@ -341,6 +359,11 @@ def slack_analysis_text(payload: dict) -> str:
             f"{payload.get('ecosystem')}/{payload.get('package')} {payload.get('new_version')}"
         ),
         f"verdict {verdict} probability {payload.get('malice_probability')}",
+    ]
+    watched = watch_line(payload.get("watch"))
+    if watched:
+        lines.append(watched)
+    lines += [
         str(payload.get("registry_url") or ""),
         f"model {payload.get('analysis_model_id')}",
     ]
@@ -404,6 +427,7 @@ def enqueue_analysis(
     triage_model_id: str | None = None,
     triage_verdict: str | None = None,
     analyst_model_id: str | None = None,
+    watch: dict | None = None,
 ) -> bool:
     payload = build_analysis_payload(
         evidence,
@@ -414,6 +438,7 @@ def enqueue_analysis(
         triage_model_id=triage_model_id,
         triage_verdict=triage_verdict,
         analyst_model_id=analyst_model_id,
+        watch=watch,
     )
     if not should_deliver_analysis(
         evidence,

@@ -70,6 +70,20 @@ Commands:
 | `python -m hunter report exhausted` | List releases that failed analysis too many times. |
 | `python -m hunter eval` | Score the bundled synthetic fixtures offline and print precision and recall. |
 | `python -m hunter models` | Show which models are configured for each role. |
+| `python -m hunter watchlist import ./my-repo` | Read your lockfiles, SBOMs, manifests and workflows and watch the packages they list. |
+
+## Your watchlist
+
+Hunter can watch the packages your own environment uses. `hunter watchlist import` reads `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `package.json`, `requirements*.txt`, `poetry.lock`, `uv.lock`, `Pipfile.lock`, CycloneDX and SPDX JSON SBOMs, GitHub workflow files and plain lists. It only parses the text: nothing is installed or run, and a version range is stored without a version.
+
+```bash
+python -m hunter watchlist import ./my-repo --source my-repo --dry-run   # see what would be stored
+python -m hunter watchlist import ./my-repo --source my-repo
+python -m hunter watchlist status
+HUNTER_WATCH_MODE=watched python -m hunter serve                          # poll and alert only on your packages
+```
+
+By default (`HUNTER_WATCH_MODE=all`) your packages are added to the popular lists. With `HUNTER_WATCH_MODE=watched`, Hunter polls only your packages, and the webhook sends only for them. Alerts for your packages say whether your files pin the confirmed version. While a watchlist exists, the public feed and public dashboard do not publish, so your package list stays on the machine. Details are in [docs/watchlist.md](docs/watchlist.md).
 
 ## Configuration
 

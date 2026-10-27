@@ -16,6 +16,8 @@ const state = {
   matrixSet: "all",
   matrixShow: "all",
   historyMetric: "catch_rate",
+  // null until the user flips "Watched only"; the server default applies until then.
+  watched: null,
 };
 
 // ---------- small helpers ----------
@@ -208,7 +210,8 @@ function setLive(ok, message) {
 
 async function refresh() {
   try {
-    const snap = await api("/api/snapshot?range=" + encodeURIComponent(state.range));
+    const watched = state.watched === null ? "" : "&watched=" + (state.watched ? "1" : "0");
+    const snap = await api("/api/snapshot?range=" + encodeURIComponent(state.range) + watched);
     state.snap = snap;
     state.lastOk = Date.now();
     renderDashboard();
@@ -228,6 +231,7 @@ function renderDashboard() {
   const snap = state.snap;
   if (!snap) return;
   tickLive();
+  renderWatchlist(snap);
   renderHero(snap);
   renderKpis(snap);
   renderFlow(snap);
@@ -235,6 +239,30 @@ function renderDashboard() {
   renderActivity(snap);
   renderSignals(snap);
   renderCost(snap);
+}
+
+// The user watchlist card and the "Watched only" toggle. Shown only when a list was imported
+// or watched mode is on. Source labels are file paths the operator chose; shown as text.
+function renderWatchlist(snap) {
+  const wl = snap.watchlist || {};
+  const total = wl.total || 0;
+  $("watched-wrap").hidden = !(total > 0 || wl.mode === "watched");
+  $("watched-only").checked = Boolean(snap.watched_only);
+  $("wl-card").hidden = !(total > 0);
+  if (!(total > 0)) return;
+  $("wl-hint").textContent = `mode ${wl.mode}, alert scope ${wl.alert_scope}; ${n(total)} names from ${n((wl.sources || []).length)} sources`;
+  const eco = ["npm", "pypi", "github-actions", "openvsx"].filter((k) => wl[k]).map((k) => titleCase(k) + " " + n(wl[k])).join(" · ");
+  const rows = (wl.sources || []).map((src) => h("tr", {},
+    h("td", { class: "pkg", text: src.source }),
+    h("td", { class: "mono", text: src.format }),
+    h("td", { text: n(src.components) + (src.skipped ? " (" + n(src.skipped) + " skipped)" : "") }),
+    h("td", {}, clock(src.imported_at), h("span", { class: "sub", text: ago(src.imported_at) })),
+    h("td", {}, src.stale ? h("span", { class: "chip warn", text: "older than 7 days" }) : h("span", { class: "faint", text: "—" }))));
+  clear($("wl-body"),
+    h("div", { class: "faint", text: eco }),
+    h("div", { class: "tablewrap" }, h("table", { class: "grid" },
+      h("thead", {}, h("tr", {}, h("th", { text: "Source" }), h("th", { text: "Format" }), h("th", { text: "Packages" }), h("th", { text: "Imported" }), h("th", { text: "Stale" }))),
+      h("tbody", {}, ...rows))));
 }
 
 function rangeWord(r) { return { "1h": "hour", "24h": "24 hours", "7d": "7 days", "30d": "30 days" }[r] || r; }
@@ -466,6 +494,7 @@ function findParams() {
   }
   p.set("offset", String(state.findOffset));
   p.set("limit", String(state.findLimit));
+  if (state.watched !== null) p.set("watched", state.watched ? "1" : "0");
   return p;
 }
 
@@ -529,6 +558,13 @@ async function openRelease(item) {
     ["Partial read", r.partial_reasons.length ? r.partial_reasons.join(", ") : "no"], ["Deferred because", r.defer_reason]])));
   if (r.registry_url && /^https:\/\//.test(r.registry_url)) {
     secs.push(h("div", {}, h("a", { href: r.registry_url, rel: "noopener noreferrer", target: "_blank", text: "Open the registry page" })));
+  }
+  if (r.watch) {
+    const w = r.watch;
+    secs.push(h("div", { class: "dsec" }, h("h4", { text: "Your watchlist" }), kv([
+      ["Direct", w.direct ? "yes" : "no"], ["Your files list", (w.pinned_versions || []).join(", ") || "a range or no version"],
+      ["This exact version", w.exact_match ? (w.tag_ref ? "yes (the tag you use pointed at this commit)" : "yes") : "no"],
+      ["Sources", (w.sources || []).join(", ")], ["Imported", clock(w.oldest_import_at) + (w.stale ? " (older than 7 days)" : "")]])));
   }
   secs.push(h("div", { class: "dsec" }, h("h4", { text: "Signals" }), h("div", { class: "sigs" }, ...r.signals.map((x) => h("span", { class: "chip", text: x })))));
   if (r.rule_hits.length) {
@@ -902,6 +938,12 @@ function init() {
       renderDetections();
     });
   }
+  $("watched-only").addEventListener("change", (e) => {
+    state.watched = e.target.checked;
+    state.findOffset = 0;
+    refresh();
+    loadFindings();
+  });
   let timer = null;
   const onFilter = () => { clearTimeout(timer); timer = setTimeout(() => { state.findOffset = 0; loadFindings(); }, 250); };
   $("find-form").addEventListener("input", onFilter);

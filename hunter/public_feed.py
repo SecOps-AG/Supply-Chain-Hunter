@@ -18,6 +18,7 @@ from xml.sax.saxutils import escape
 
 from hunter.config import Config
 from hunter.db import Database, iso, utcnow
+from hunter.inventory.scope import public_publish_blocked
 from hunter.taxonomy import FAMILY_CRITERIA
 from hunter.webhook import partial_read_reasons
 
@@ -418,6 +419,13 @@ def publish_public_feed(db: Database, config: Config, *, client=None) -> bool:
     required setting is present.
     """
     if not config.feed_configured():
+        return False
+    blocked = public_publish_blocked(db, config)
+    if blocked:
+        # A user watchlist is private. The error shows on local /health; it is stored once, not every pass.
+        state = db.public_feed_state()
+        if state is None or state["last_error"] != blocked:
+            db.mark_public_feed_error(blocked)
         return False
     try:
         limit = config.feed_limit if isinstance(config.feed_limit, int) and config.feed_limit > 0 else 200
