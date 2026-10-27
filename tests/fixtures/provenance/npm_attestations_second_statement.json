@@ -1,0 +1,15 @@
+{
+  "attestations": [
+    {
+      "predicateType": "https://github.com/npm/attestation/tree/main/specs/publish/v0.1"
+    },
+    {
+      "bundle": {
+        "dsseEnvelope": {
+          "payload": "eyJfdHlwZSI6ICJodHRwczovL2luLXRvdG8uaW8vU3RhdGVtZW50L3YxIiwgInByZWRpY2F0ZSI6IHsiYnVpbGREZWZpbml0aW9uIjogeyJleHRlcm5hbFBhcmFtZXRlcnMiOiB7IndvcmtmbG93IjogeyJyZWYiOiAicmVmcy90YWdzL3YxIiwgInJlcG9zaXRvcnkiOiAib3JnL3dpZGdldCIsICJwYXRoIjogIi5naXRodWIvd29ya2Zsb3dzL3JlbGVhc2UueW1sIn19fSwgInJ1bkRldGFpbHMiOiB7ImJ1aWxkZXIiOiB7ImlkIjogImh0dHBzOi8vZ2l0aHViLmNvbS9hY3Rpb25zL3J1bm5lci9naXRodWItaG9zdGVkIn19fX0="
+        }
+      },
+      "predicateType": "https://slsa.dev/provenance/v1"
+    }
+  ]
+}

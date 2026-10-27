@@ -6,6 +6,7 @@ import sqlite3
 import threading
 import urllib.error
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from hunter import takeover
 from hunter.config import Config
@@ -522,3 +523,106 @@ def test_classify_stops_waiting_for_takeover_signals_after_the_grace(tmp_path, m
     monkeypatch.setattr("hunter.service.classify_job", fake_classify)
     drain_jobs(db, _config(tmp_path), jev=None, loader=object(), workers=1)
     assert seen == ["stale"]
+
+
+# --- provenance drift against recorded registry documents ---------------------
+
+FIXTURES = Path(__file__).parent / "fixtures" / "provenance"
+
+
+def _fx(name: str) -> dict:
+    return json.loads((FIXTURES / f"{name}.json").read_text())
+
+
+def _npm_run(old: str | None, new: str | None, **kwargs):
+    routes = {}
+    if old:
+        routes[_att_url("widget", "1.0.0")] = _fx(old)
+    if new:
+        routes[_att_url("widget", "1.0.1")] = _fx(new)
+    http = FakeHttp(routes, **kwargs)
+    return npm_signals(_npm_doc(), "widget", "1.0.1", transport=http, registry=NPM), http
+
+
+def test_npm_same_provenance_and_a_new_tag_are_quiet():
+    assert _npm_run("npm_attestations_ok", "npm_attestations_ok")[0].signals == []
+    assert _npm_run("npm_attestations_ok", "npm_attestations_new_tag")[0].signals == []
+
+
+def test_npm_repo_workflow_and_builder_changes_name_the_field():
+    for fixture, field in (
+        ("npm_attestations_other_repo", "repository"),
+        ("npm_attestations_other_workflow", "workflow"),
+        ("npm_attestations_other_builder", "builder"),
+    ):
+        found, _http = _npm_run("npm_attestations_ok", fixture)
+        assert found.signals == ["provenance_identity_changed"], fixture
+        assert found.detail["provenance_identity_changed"]["fields"] == [field]
+        assert found.score == WEIGHTS["provenance_identity_changed"]
+
+
+def test_npm_publish_only_attestation_counts_as_lost():
+    found, _http = _npm_run("npm_attestations_ok", "npm_attestations_publish_only")
+    assert found.signals == ["provenance_lost"]
+    assert found.score == WEIGHTS["provenance_lost"]
+
+
+def test_npm_adopting_provenance_for_the_first_time_is_quiet():
+    found, http = _npm_run(None, "npm_attestations_ok")
+    assert found.signals == []
+    assert http.calls == [_att_url("widget", "1.0.0")]
+
+
+def test_npm_unreadable_new_statement_after_a_named_one_is_a_change():
+    found, _http = _npm_run("npm_attestations_ok", "npm_attestations_malformed_payload")
+    assert found.signals == ["provenance_identity_changed"]
+    assert found.detail["provenance_identity_changed"]["new"] == ""
+
+
+def test_npm_unreadable_old_statement_is_no_baseline():
+    found, _http = _npm_run("npm_attestations_malformed_payload", "npm_attestations_other_repo")
+    assert found.signals == []
+
+
+def test_npm_provenance_statement_after_a_publish_attestation_is_read():
+    assert npm_provenance_identity(_fx("npm_attestations_second_statement")) == npm_provenance_identity(
+        _fx("npm_attestations_ok")
+    )
+    assert _npm_run("npm_attestations_ok", "npm_attestations_second_statement")[0].signals == []
+
+
+def test_npm_server_error_on_the_new_release_is_unknown_not_lost():
+    found, _http = _npm_run("npm_attestations_ok", None, fail={_att_url("widget", "1.0.1")})
+    assert found.signals == []
+    assert found.transient
+    assert found.error.startswith("provenance")
+
+
+def _pypi_run(old: str | None, new: str | None):
+    extra = []
+    if old:
+        extra.append((_prov("1.0.0")[0], _fx(old)))
+    if new:
+        extra.append((_prov("1.0.1")[0], _fx(new)))
+    return pypi_signals(_pypi_doc(), "pkg", "1.0.1", transport=_pypi_http(*extra), pypi_base=PYPI)
+
+
+def test_pypi_same_provenance_is_quiet():
+    assert _pypi_run("pypi_provenance_ok", "pypi_provenance_ok").signals == []
+
+
+def test_pypi_publisher_changes_name_the_field():
+    for fixture, field in (
+        ("pypi_provenance_other_repo", "repository"),
+        ("pypi_provenance_other_workflow", "workflow"),
+        ("pypi_provenance_other_environment", "environment"),
+        ("pypi_provenance_gitlab", "kind"),
+    ):
+        found = _pypi_run("pypi_provenance_ok", fixture)
+        assert found.signals == ["provenance_identity_changed"], fixture
+        assert found.detail["provenance_identity_changed"]["fields"] == [field]
+
+
+def test_pypi_lost_and_first_adoption():
+    assert _pypi_run("pypi_provenance_ok", None).signals == ["provenance_lost"]
+    assert _pypi_run(None, "pypi_provenance_ok").signals == []

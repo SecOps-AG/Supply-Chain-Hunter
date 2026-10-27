@@ -1,0 +1,12 @@
+{
+  "attestations": [
+    {
+      "bundle": {
+        "dsseEnvelope": {
+          "payload": "!!not-base64-json"
+        }
+      },
+      "predicateType": "https://slsa.dev/provenance/v1"
+    }
+  ]
+}

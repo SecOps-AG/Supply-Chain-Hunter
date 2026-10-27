@@ -1,0 +1,12 @@
+{
+  "attestations": [
+    {
+      "bundle": {
+        "dsseEnvelope": {
+          "payload": "eyJfdHlwZSI6ICJodHRwczovL2luLXRvdG8uaW8vU3RhdGVtZW50L3YxIiwgInByZWRpY2F0ZSI6IHsiYnVpbGREZWZpbml0aW9uIjogeyJleHRlcm5hbFBhcmFtZXRlcnMiOiB7IndvcmtmbG93IjogeyJyZWYiOiAicmVmcy90YWdzL3YxIiwgInJlcG9zaXRvcnkiOiAiZXZpbC93aWRnZXQiLCAicGF0aCI6ICIuZ2l0aHViL3dvcmtmbG93cy9yZWxlYXNlLnltbCJ9fX0sICJydW5EZXRhaWxzIjogeyJidWlsZGVyIjogeyJpZCI6ICJodHRwczovL2dpdGh1Yi5jb20vYWN0aW9ucy9ydW5uZXIvZ2l0aHViLWhvc3RlZCJ9fX19"
+        }
+      },
+      "predicateType": "https://slsa.dev/provenance/v1"
+    }
+  ]
+}

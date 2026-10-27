@@ -9,7 +9,7 @@ Signals:
 - ``provenance_lost``: the previous release had a provenance attestation and
   this one has none.
 - ``provenance_identity_changed``: both have provenance but the source
-  repository or workflow differs.
+  repository, workflow or builder differs.
 - ``maintainer_added``: a maintainer or owner that the previous release did
   not list.
 - ``publisher_new``: the npm account that published this release never
@@ -237,22 +237,69 @@ def _b64(text: str) -> bytes:
 
 
 def npm_provenance_identity(attestations: dict) -> str | None:
-    """Repository and workflow from the SLSA provenance statement, or "" when it has none."""
+    """Repository, workflow and builder from the SLSA provenance statement.
+
+    "" when a provenance statement is present but names none of them, None when
+    the release has no provenance statement. The workflow ref is left out: it
+    changes with every release tag.
+    """
+    found = False
     for item in attestations.get("attestations") or []:
         if not isinstance(item, dict) or "provenance" not in str(item.get("predicateType") or ""):
             continue
+        found = True
         envelope = (item.get("bundle") or {}).get("dsseEnvelope") or {}
         try:
             statement = json.loads(_b64(str(envelope.get("payload") or "")).decode("utf-8"))
         except (ValueError, UnicodeDecodeError):
-            return ""
+            continue
         predicate = statement.get("predicate") or {} if isinstance(statement, dict) else {}
+        if not isinstance(predicate, dict):
+            continue
         build = predicate.get("buildDefinition") or {}
         workflow = (build.get("externalParameters") or {}).get("workflow") or {}
-        if isinstance(workflow, dict) and (workflow.get("repository") or workflow.get("path")):
-            return f"{workflow.get('repository') or ''}:{workflow.get('path') or ''}".lower()
-        return ""
-    return None
+        builder = (predicate.get("runDetails") or {}).get("builder") or {}
+        if not isinstance(workflow, dict):
+            workflow = {}
+        builder_id = str(builder.get("id") or "") if isinstance(builder, dict) else ""
+        if workflow.get("repository") or workflow.get("path") or builder_id:
+            identity = f"{workflow.get('repository') or ''}:{workflow.get('path') or ''}"
+            if builder_id:
+                identity += f"|builder={builder_id}"
+            return identity.lower()
+    return "" if found else None
+
+
+def _npm_parts(identity: str) -> list[str]:
+    base, _sep, builder = identity.partition("|builder=")
+    repository, _sep, workflow = base.partition(":")
+    return [repository, workflow, builder]
+
+
+NPM_FIELDS = ("repository", "workflow", "builder")
+PYPI_FIELDS = ("kind", "repository", "workflow", "environment")
+
+
+def _identity_fields(labels: tuple[str, ...], old: list[str], new: list[str]) -> list[str]:
+    old, new = (old + [""] * len(labels))[: len(labels)], (new + [""] * len(labels))[: len(labels)]
+    return [label for label, before, after in zip(labels, old, new) if before != after]
+
+
+def _compare_identity(
+    out: TakeoverSignals, previous: str, old_identity: str, new_identity: str | None, ecosystem: str
+) -> None:
+    """Lost provenance, or a changed identity. A blank old identity is no baseline."""
+    if new_identity is None:
+        out.add("provenance_lost", previous=previous)
+    elif old_identity and new_identity != old_identity:
+        out.add(
+            "provenance_identity_changed",
+            old=old_identity,
+            new=new_identity,
+            fields=_identity_fields(NPM_FIELDS, _npm_parts(old_identity), _npm_parts(new_identity))
+            if ecosystem == "npm"
+            else _identity_fields(PYPI_FIELDS, old_identity.split(":"), new_identity.split(":")),
+        )
 
 
 def _npm_attestation(transport: HttpGet, registry: str, name: str, version: str) -> str | None:
@@ -310,11 +357,7 @@ def npm_signals(
     try:
         old_identity = _npm_attestation(transport, registry, name, old)
         if old_identity is not None:
-            new_identity = _npm_attestation(transport, registry, name, version)
-            if new_identity is None:
-                out.add("provenance_lost", previous=old)
-            elif old_identity and new_identity and old_identity != new_identity:
-                out.add("provenance_identity_changed", old=old_identity, new=new_identity)
+            _compare_identity(out, old, old_identity, _npm_attestation(transport, registry, name, version), "npm")
     except FeedError as exc:
         out.fail("provenance", exc)
     return out
@@ -350,13 +393,13 @@ def pypi_owners(info: dict) -> set[str]:
 
 
 def pypi_publisher_identity(provenance: dict) -> str:
-    """Trusted-publisher identity (kind, repository, workflow) from an Integrity API answer."""
+    """Trusted-publisher identity (kind, repository, workflow, environment) from an Integrity API answer."""
     names = []
     for bundle in provenance.get("attestation_bundles") or []:
         publisher = (bundle or {}).get("publisher") or {} if isinstance(bundle, dict) else {}
         if not isinstance(publisher, dict):
             continue
-        parts = [str(publisher.get(key) or "") for key in ("kind", "repository", "workflow")]
+        parts = [str(publisher.get(key) or "") for key in ("kind", "repository", "workflow", "environment")]
         names.append(":".join(parts).lower())
     return "|".join(sorted(set(names)))
 
@@ -437,10 +480,7 @@ def pypi_signals(
         old_identity = _pypi_provenance(transport, pypi_base, name, old, old_files)
         if old_identity is not None:
             new_identity = _pypi_provenance(transport, pypi_base, name, version, new_files)
-            if new_identity is None:
-                out.add("provenance_lost", previous=old)
-            elif old_identity and new_identity and old_identity != new_identity:
-                out.add("provenance_identity_changed", old=old_identity, new=new_identity)
+            _compare_identity(out, old, old_identity, new_identity, "pypi")
     except FeedError as exc:
         out.fail("provenance", exc)
     return out
