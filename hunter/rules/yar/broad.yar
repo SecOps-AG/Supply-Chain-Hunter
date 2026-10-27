@@ -12,7 +12,8 @@ rule h_decode_exec
     $atob = "atob" nocase ascii
     $codecs = "codecs.decode" nocase ascii
     // Whole words only, so execute, executor, evaluate and retrieval do not count.
-    $exec = /\b\x65xec\b/ nocase ascii
+    // execFile, execFileSync, execve, execvp(e), execl(p|e) are exec too.
+    $exec = /\b\x65xec(File(Sync)?|ve|vpe?|l[pe]?)?\b/ nocase ascii
     $eval = /\beval\b/ nocase ascii
     $exs = "\x65xecSync" nocase ascii
     $spawn = "spawn" nocase ascii
@@ -121,8 +122,10 @@ rule h_credential
     // GITHUB_TOKEN / GH_TOKEN set from it or from github.token.
     $fsec = "secrets.GITHUB_TOKEN" nocase ascii
     $fenv = /\b(GITHUB_TOKEN|GH_TOKEN)\s*:\s*\$\{\{\s*(secrets\.GITHUB_TOKEN|github\.token)\s*\}\}/ nocase ascii
+    // The token sent out on the same line as curl or wget is not a plain handoff.
+    $fsend = /\b(curl|wget)\b[^\n]{0,200}(secrets\.GITHUB_TOKEN|github\.token|GITHUB_TOKEN|GH_TOKEN)/ nocase ascii
   condition:
-    $a or $b or $c or $d or $g or $h or $i or $j or $k or
+    $a or $b or $c or $d or $g or $h or $i or $j or $k or $fsend or
     for any i in (1 .. #e) : (
       not for any j in (1 .. #fenv) : (@fenv[j] == @e[i])
     ) or
@@ -144,7 +147,11 @@ rule h_xor
     // xorshift, xoroshiro and xorwow are random number generators, not decoders.
     $prng = /xor(shift|oshiro|wow)/ nocase ascii
     // The XOR is applied to the char code itself. A string hash puts it before.
-    $ccx = /charCodeAt\([^()]{0,24}\)\)?\s*\^/ ascii
+    // One level of nested parens is allowed: charCodeAt(i % (k.length)) ^ x.
+    $ccx = /charCodeAt\(([^()]|\([^()]{0,16}\)){0,24}\)\)?\s*\^/ ascii
+    // Reversed order inside a call: push(k ^ s.charCodeAt(i)). A hash puts a
+    // closing paren or ^= before it instead.
+    $xcc = /[(,]\s*[A-Za-z_$][\w$]{0,40}\s*\^\s*[\w$.\[\]]{1,60}\.charCodeAt\(/ ascii
     $fcc = "\x66romCharCode" ascii
     $op1 = ") ^" ascii
     $op2 = ")^" ascii
@@ -152,7 +159,7 @@ rule h_xor
     $op5 = " ^ " ascii
   condition:
     #xor > #prng or
-    $ccx or
+    $ccx or $xcc or
     for any i in (1 .. #fcc) : (
       $op1 in (@fcc[i] .. @fcc[i] + 90) or
       $op2 in (@fcc[i] .. @fcc[i] + 90) or
