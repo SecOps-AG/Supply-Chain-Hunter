@@ -555,7 +555,11 @@ async function openRelease(item) {
   secs.push(h("div", { class: "dsec" }, h("h4", { text: "Scout" }), kv([
     ["Versions", (r.old_version || "?") + " → " + r.version], ["Band", r.band], ["P(malice)", prob(r.p)], ["Family", r.family],
     ["Subtype", r.subtype], ["Rule verdict", r.rule_verdict], ["Decision model", shownDecisionModel(r.scout_model_id)], ["Scored", clock(r.created_at)],
+    ["Risk score", r.risk_score === null || r.risk_score === undefined ? null : r.risk_score + " / 100"],
     ["Partial read", r.partial_reasons.length ? r.partial_reasons.join(", ") : "no"], ["Deferred because", r.defer_reason]])));
+  if (r.risk_why && r.risk_why.length) {
+    secs.push(h("div", { class: "dsec" }, h("h4", { text: "Why this risk score" }), h("div", { class: "sigs" }, ...r.risk_why.map((x) => h("span", { class: "chip", text: "+" + x.points + " " + x.text })))));
+  }
   if (r.registry_url && /^https:\/\//.test(r.registry_url)) {
     secs.push(h("div", {}, h("a", { href: r.registry_url, rel: "noopener noreferrer", target: "_blank", text: "Open the registry page" })));
   }

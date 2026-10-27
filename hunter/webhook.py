@@ -18,6 +18,7 @@ from datetime import datetime
 from hunter.config import ALERT_WEBHOOK_MIN_PROBABILITY
 from hunter.db import Database, iso, utcnow
 from hunter.models import Classification
+from hunter.risk_score import risk_score
 
 USER_AGENT = "supply-chain-hunter/0.1"
 
@@ -116,6 +117,7 @@ def slack_body(text: str) -> str:
 
 def build_payload(result: Classification, *, when: datetime | None = None) -> dict:
     moment = when or utcnow()
+    risk = risk_score(result)
     return {
         "kind": "classification",
         "idempotency_key": idempotency_key(result.ecosystem, result.name, result.new_version),
@@ -145,6 +147,8 @@ def build_payload(result: Classification, *, when: datetime | None = None) -> di
         "pass_d_ran": result.pass_d_ran,
         "defer_reason": result.defer_reason,
         "child_findings": result.child_findings,
+        "risk_score": risk.score,
+        "risk_why": risk.why_dicts(),
         **_rule_fields(result),
         **({"action": dict(result.action_ref)} if result.action_ref else {}),
     }
