@@ -1324,6 +1324,38 @@ class Database:
             ),
         )
 
+    def note_removed_before_scan(
+        self,
+        ecosystem: str,
+        name: str,
+        version: str,
+        *,
+        reason: str = "release removed from the registry before it was scanned",
+        when: datetime | None = None,
+    ) -> None:
+        """Human review item for a watched release pulled before its scan. Stops its job and retries."""
+        moment = iso(when or utcnow())
+        key = (ecosystem, name, version)
+        with self._lock:
+            self._conn.execute(
+                "UPDATE release_jobs SET status = 'done' WHERE ecosystem = ? AND name = ? AND version = ?", key
+            )
+            self._conn.execute(
+                "UPDATE classify_retries SET status = 'done' WHERE ecosystem = ? AND name = ? AND version = ?", key
+            )
+            self._upsert_human_review(
+                kind="removed_before_scan",
+                idempotency_key=f"{ecosystem}:{name}:{version}",
+                ecosystem=ecosystem,
+                name=name,
+                version=version,
+                attempts=0,
+                last_error="",
+                reason=reason,
+                moment=moment,
+            )
+            self._conn.commit()
+
     def human_review_queue(self, limit: int = 100) -> list[dict]:
         with self._lock:
             rows = self._conn.execute(

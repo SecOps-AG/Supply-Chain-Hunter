@@ -360,6 +360,25 @@ def pypi_events_to_versions(events: list[tuple], watch: dict[str, int]) -> list[
     return [(name, version, found[(name, version)]) for name, version in order]
 
 
+def pypi_removed_releases(events: list[tuple], watch: dict[str, int | None]) -> list[tuple[str, str, int | None]]:
+    """Watched (name, version, rank) whose whole release was removed. File removals and yanks do not count."""
+    found: list[tuple[str, str, int | None]] = []
+    seen: set[tuple[str, str]] = set()
+    for event in events:
+        if len(event) < 5:
+            continue
+        name, version, _timestamp, action, _serial = event[:5]
+        if str(action or "").strip().lower() != "remove release" or not version:
+            continue
+        key_name = normalize_pypi_name(str(name))
+        pair = (key_name, str(version))
+        if key_name not in watch or pair in seen:
+            continue
+        seen.add(pair)
+        found.append((key_name, str(version), watch[key_name]))
+    return found
+
+
 def max_serial(events: list[tuple]) -> int | None:
     serials = [int(event[4]) for event in events if len(event) >= 5]
     return max(serials) if serials else None
