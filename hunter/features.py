@@ -836,6 +836,14 @@ def wheel_only_files(old_files: dict[str, str], new_files: dict[str, str]) -> li
     return found
 
 
+def sdist_dropped(old_files: dict[str, str], new_files: dict[str, str]) -> bool:
+    """The previous release shipped an sdist and this one ships only a wheel."""
+    old_sdist = any(path.startswith("sdist/") for path in old_files)
+    new_sdist = any(path.startswith("sdist/") for path in new_files)
+    new_wheel = any(path.startswith("wheel/") for path in new_files)
+    return old_sdist and new_wheel and not new_sdist
+
+
 def _maturin_data_lines(text: str) -> set[str]:
     table = ""
     found: set[str] = set()
@@ -998,5 +1006,6 @@ def extract_features(
         new_binary=new_executable_binary(old_files, new_files),
         outside_package_files=outside_package_files(old_files, new_files, meta.name),
         wheel_only_files=wheel_only_files(old_files, new_files),
+        sdist_dropped=sdist_dropped(old_files, new_files),
         build_config_changes=build_config_changes(old_files, new_files),
     )

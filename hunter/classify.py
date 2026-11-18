@@ -179,6 +179,8 @@ def _note_local_signals(state: dict, code: CodeFeatures) -> None:
         notes.append("local_signal outside_package_install: " + ",".join(code.outside_package_files[:12]))
     if code.wheel_only_files:
         notes.append("local_signal wheel_only_file: " + ",".join(code.wheel_only_files[:12]))
+    if code.sdist_dropped:
+        notes.append("local_signal sdist_dropped: the previous release had a source archive, this one has only a wheel")
     if code.build_config_changes:
         notes.append("local_signal build_config_change: " + ",".join(code.build_config_changes[:4]))
     if not notes:
@@ -233,6 +235,7 @@ _WARNING_SIGNALS = frozenset(
         "partial_read",
         "rule_malicious",
         "rule_unsure",
+        "sdist_dropped",
     }
 )
 _WARNING_PREFIXES = (
