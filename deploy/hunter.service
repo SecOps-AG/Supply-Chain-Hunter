@@ -16,6 +16,8 @@ Environment=HUNTER_TOP_N=15000
 Environment=HUNTER_POLL_INTERVAL=300
 Environment=HUNTER_WORKERS=4
 Environment=HUNTER_MAX_PENDING=2000
+# Rule pack on: rules read each release diff before Scout (see docs/configuration.md).
+Environment=HUNTER_RULES=on
 # Narrow the watch with HUNTER_TOP_N, HUNTER_WORKERS, and HUNTER_POLL_INTERVAL (npm).
 # PyPI polls every 60 s (HUNTER_PYPI_POLL_INTERVAL, at least 60).
 # Logs go to $HUNTER_LOG_DIR/hunter_YYYYMMDD.log (default ./logs) and stderr.
