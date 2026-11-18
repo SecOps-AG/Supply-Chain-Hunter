@@ -1961,7 +1961,7 @@ def serve(
                     target=_feed_loop,
                     kwargs={
                         "stop": stop,
-                        "interval": config.poll_interval,
+                        "interval": config.pypi_poll_interval,
                         "fn": lambda: _poll_pypi_safely(db, config, pypi_feed, transport),
                     },
                     name="hunter-pypi",
