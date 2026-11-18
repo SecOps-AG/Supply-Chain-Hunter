@@ -554,6 +554,62 @@ rule env_dump_send
     )
 }
 
+rule env_keyword_send
+{
+  meta:
+    tier = "weak"
+    scope = "code"
+    eco = "both"
+    summary = "Environment variables are filtered by secret keywords and a network call is made in the same added code."
+  strings:
+    $it1 = "environ.items()" ascii
+    $it2 = "environ.keys()" ascii
+    $it3 = "Object.entries(\x70rocess.env)" ascii
+    $it4 = "Object.keys(\x70rocess.env)" ascii
+    $k1 = "\"TOKEN\"" ascii
+    $k2 = "'TOKEN'" ascii
+    $k3 = "\"SECRET\"" ascii
+    $k4 = "'SECRET'" ascii
+    $k5 = "\"PASSWORD\"" ascii
+    $k6 = "'PASSWORD'" ascii
+    $k7 = "\"PASSWD\"" ascii
+    $k8 = "'PASSWD'" ascii
+    $k9 = "\"KEY\"" ascii
+    $k10 = "'KEY'" ascii
+    $k11 = "\"CREDENTIAL" ascii
+    $k12 = "'CREDENTIAL" ascii
+    $n1 = "\x66etch(" ascii
+    $n2 = "\x68ttp.request" ascii
+    $n3 = "\x68ttps.request" ascii
+    $n4 = "axios" ascii
+    $n5 = "requests.post" ascii
+    $n6 = "requests.put" ascii
+    $n7 = "urlopen" ascii
+    $n8 = "urllib.request" ascii
+    $n9 = "httpx.post" ascii
+    $n10 = "socket.connect" ascii
+    $n11 = "socket.create_connection" ascii
+  condition:
+    any of ($it*) and 2 of ($k*) and any of ($n*)
+}
+
+rule proc_environ_read
+{
+  meta:
+    tier = "weak"
+    scope = "code"
+    eco = "both"
+    comments = "skip"
+    summary = "Reads a process environment from /proc/<pid>/environ, where other programs keep their secrets."
+  strings:
+    $p = "\x2fproc\x2f" ascii
+    $e = "\x2fenviron" ascii
+  condition:
+    for any i in (1 .. #p) : (
+      $e in (@p[i] + 5 .. @p[i] + 48)
+    )
+}
+
 rule npm_hook_beacon
 {
   meta:
