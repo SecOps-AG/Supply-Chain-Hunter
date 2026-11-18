@@ -332,3 +332,5 @@ A YARA and Python rule pack under `hunter/rules/` reads the text each release ad
 | Variable | Default | What it does |
 |---|---|---|
 | `HUNTER_RULES` | `off` | `on` turns the rule pack on in the classifier. |
+
+The network-host rules (`net_oast_host`, `net_tunnel_host`, `net_paste_drop`, `net_exfil_messenger`, `net_ip_lookup`, `net_shortener`, `net_abused_tld`, `net_raw_ip_url`, `cloud_imds`) also read base64 and hex string literals the release added, after decoding them. Such a hit names the encoding in its matched text, for example `base64 -> https://...`.
