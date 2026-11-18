@@ -233,14 +233,16 @@ def _startup_hook_file(context: FileContext) -> Iterator[tuple[int, str]]:
 
 
 def _startup_hook_payload(context: FileContext) -> Iterator[tuple[int, str]]:
-    """A new startup hook that loads a module this release adds at the top of site-packages,
-    where that module decodes and runs code or reaches the network.
+    """A new startup hook that loads a module which decodes and runs code or reaches the network,
+    where that module is new at the top of site-packages, or already existed and gained that code
+    in this release.
 
-    A new hook that loads the package's own code, or a new module with none of those, stays weak.
+    A new hook that loads unchanged package code, or a new module with none of those, stays weak.
     """
     from ..features import (
         install_target,
         is_new_install,
+        module_gained_indicators,
         new_top_level_module,
         payload_indicators,
         pth_imported_modules,
@@ -263,6 +265,9 @@ def _startup_hook_payload(context: FileContext) -> Iterator[tuple[int, str]]:
                     if found:
                         yield line_no, f"{line.strip()} -> {path}: {','.join(found)}"
                         return
+                for path, gained in module_gained_indicators(old_files, new_files, module):
+                    yield line_no, f"{line.strip()} -> {path}: {','.join(gained)} (new in existing module)"
+                    return
         return
     if not is_new_install(old_files, target):
         return
