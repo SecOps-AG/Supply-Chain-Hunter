@@ -513,6 +513,106 @@ def _rule_hit_detail(hits) -> str:
     return "rule_hit: " + ", ".join(rules)
 
 
+# At most this many files are kept only because they wire up code this release added,
+# so a refactor that touches many importers cannot crowd other files out of the window.
+LINKED_KEEP_LIMIT = 8
+_MODULE_EXT = {".py", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts"}
+_DYNAMIC_MODULE = re.compile(r"(?:__import__|import_module)\(\s*['\"]([\w.]+)['\"]")
+_DOTTED = re.compile(r"\w+(?:\.\w+)*")
+
+
+def _pth_modules(line: str) -> set[str]:
+    """Dotted module names one .pth import line loads."""
+    names = set(_DYNAMIC_MODULE.findall(line))
+    for statement in line.split(";"):
+        statement = statement.strip()
+        found = re.match(r"import\s+(.+)", statement)
+        if found:
+            names.update(part.split()[0] for part in found.group(1).split(",") if part.split())
+            continue
+        found = re.match(r"from\s+([\w.]+)\s+import\s+([\w\s,]+)", statement)
+        if found:
+            base = found.group(1)
+            names.add(base)
+            names.update(f"{base}.{part.split()[0]}" for part in found.group(2).split(",") if part.split())
+    return {name for name in names if _DOTTED.fullmatch(name)}
+
+
+def _module_files(name: str) -> list[str]:
+    """Relative files Python runs to import `name`: each package __init__, then the module."""
+    parts = name.split(".")
+    files = ["/".join(parts[:end]) + "/__init__.py" for end in range(1, len(parts) + 1)]
+    files.append("/".join(parts) + ".py")
+    return files
+
+
+def _module_name(path: str) -> str:
+    item = PurePosixPath(path)
+    return item.parent.name if item.stem in {"__init__", "index"} else item.stem
+
+
+# Import statements, `module.func(` calls, and dynamic imports by string.
+_IMPORT_STATEMENT = re.compile(r"^\s*(?:from|import)\b(.*)$", re.M)
+_MODULE_CALL = re.compile(r"(?<![\w.])(\w+)\s*\.\s*\w+\s*\(")
+_IMPORT_BY_STRING = re.compile(r"(?:__import__|import_module|require|import)\s*\(\s*['\"]([^'\"]+)['\"]")
+
+
+def _used_modules(added: str) -> set[str]:
+    """Names added lines import or call as a module."""
+    words: set[str] = set(_MODULE_CALL.findall(added))
+    for text in _IMPORT_STATEMENT.findall(added) + _IMPORT_BY_STRING.findall(added):
+        words.update(re.findall(r"\w+", text))
+    return words
+
+
+def linked_paths(
+    old_files: Mapping[str, str],
+    new_files: Mapping[str, str],
+    *,
+    diffs: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Changed files that wire up code this release added, with the reason.
+
+    (a) a module a new .pth import line loads, and (b) a file whose added lines import
+    or call a module this release added. .pth targets come first; at most LINKED_KEEP_LIMIT.
+    `diffs` is a cache of unified diffs by path and is filled in as needed.
+    """
+    cache = diffs if diffs is not None else {}
+    changed = sorted(p for p in new_files if old_files.get(p) != new_files[p])
+    found: dict[str, str] = {}
+    for pth in changed:
+        if not pth.lower().endswith(".pth"):
+            continue
+        old = [old_files[pth]] if pth in old_files else []
+        root = _artifact_split(pth)[0]
+        rels = {
+            rel
+            for _, line in new_pth_import_lines(pth, new_files[pth], old)
+            for name in _pth_modules(line)
+            for rel in _module_files(name)
+        }
+        for path in changed:
+            if path == pth or _artifact_split(path)[0] != root:
+                continue
+            if any(path == rel or path.endswith("/" + rel) for rel in rels):
+                found.setdefault(path, f"linked_code: loaded by new .pth line in {pth}")
+    added = [p for p in changed if p not in old_files and PurePosixPath(p).suffix.lower() in _MODULE_EXT]
+    names = {name for name in map(_module_name, added) if len(name) > 1 and name.isidentifier()}
+    if names:
+        # Modified files before added ones.
+        sources = sorted((p for p in changed if is_source(p) and p not in found), key=lambda p: (p not in old_files, p))
+        for path in sources:
+            if len(found) >= LINKED_KEEP_LIMIT:
+                break
+            if path not in cache:
+                cache[path] = unified_diff(path, old_files.get(path, ""), new_files[path])
+            others = names - {_module_name(path)} if path not in old_files else names
+            used = sorted(_used_modules(added_lines(cache[path])) & others)
+            if used:
+                found[path] = f"linked_code: uses new module {used[0]}"
+    return dict(list(found.items())[:LINKED_KEEP_LIMIT])
+
+
 def diff_trees(
     old_files: dict[str, str],
     new_files: dict[str, str],
@@ -520,8 +620,14 @@ def diff_trees(
     force_keep: Mapping[str, list] | None = None,
     known_diffs: Mapping[str, str] | None = None,
 ) -> list[FileDiff]:
-    """Kept file diffs. A path in `force_keep` (a rule hit) is kept even when no category fits."""
-    forced = force_keep or {}
+    """Kept file diffs. A path in `force_keep` (a rule hit) is kept even when no category fits.
+
+    So is a file that wires up code this release added (see `linked_paths`).
+    """
+    cache = dict(known_diffs or {})
+    forced = dict(force_keep or {})
+    for path in linked_paths(old_files, new_files, diffs=cache):
+        forced.setdefault(path, [])
     paths = sorted(set(old_files) | set(new_files))
     diffs: list[FileDiff] = []
     for path in paths:
@@ -529,7 +635,7 @@ def diff_trees(
         new = new_files.get(path, "")
         if old == new:
             continue
-        diff_text = known_diffs[path] if known_diffs and path in known_diffs else unified_diff(path, old, new)
+        diff_text = cache[path] if path in cache else unified_diff(path, old, new)
         added = added_lines(diff_text)
         category = categorize(path, added, new, path not in old_files)
         if category is None and path in forced:
@@ -863,6 +969,7 @@ def _changed_rows(
     force_keep: Mapping[str, list] | None = None,
 ) -> list[tuple[str, str, str, str]]:
     forced = force_keep or {}
+    linked = linked_paths(old_files, new_files)
     kind_order = {"added": 0, "deleted": 1, "modified": 2}
     paths = sorted(
         set(old_files) | set(new_files),
@@ -882,8 +989,10 @@ def _changed_rows(
                 disposition, detail = "included", rule_detail
             elif forced[path]:
                 detail = f"{detail}; {rule_detail}"
+        if disposition == "dropped" and path in linked:
+            disposition, detail = "included", linked[path]
         rows.append((kind, disposition, path, detail))
-    return _mark_bundle_duplicate_rows(rows, old_files, new_files, forced=set(forced))
+    return _mark_bundle_duplicate_rows(rows, old_files, new_files, forced=set(forced) | set(linked))
 
 
 def changed_file_manifest(
