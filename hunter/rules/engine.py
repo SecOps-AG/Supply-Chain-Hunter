@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import bisect
 import re
 import time
@@ -27,6 +29,49 @@ NOTE_SUFFIXES = MEDIA_SUFFIXES | FONT_SUFFIXES | {".pdf", ".svg", ".tiff"}
 EXECUTABLE_SUFFIXES = {".node", ".so", ".dll", ".dylib", ".exe"}
 ARCHIVE_SUFFIXES = {".tgz", ".tar", ".zip", ".whl", ".jar", ".egg", ".7z", ".gz", ".bz2", ".xz"}
 _HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+# Network-host rules that also read base64 and hex string literals after decoding.
+DECODED_RULES = frozenset({
+    "net_oast_host", "net_tunnel_host", "net_paste_drop", "net_exfil_messenger", "net_ip_lookup",
+    "net_shortener", "net_abused_tld", "net_raw_ip_url", "cloud_imds",
+})
+DECODED_LITERALS_PER_FILE = 64
+_ENCODED_LITERAL = re.compile(r"""(["'])([A-Za-z0-9+/_-]{16,4096}={0,2})\1""")
+_HEX_LITERAL = re.compile(r"^(?:[0-9a-fA-F]{2})+$")
+
+
+def _decode_literal(literal: str) -> tuple[str, str] | None:
+    """(kind, text) for a hex or base64 literal that decodes to mostly printable text."""
+    raw: bytes | None = None
+    kind = "hex"
+    if _HEX_LITERAL.match(literal):
+        raw = bytes.fromhex(literal)
+    else:
+        kind = "base64"
+        body = literal.rstrip("=").replace("-", "+").replace("_", "/")
+        try:
+            raw = base64.b64decode(body + "=" * (-len(body) % 4), validate=True)
+        except (binascii.Error, ValueError):
+            return None
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    if len(text) < 8 or sum(char.isprintable() for char in text) < 0.9 * len(text):
+        return None
+    return kind, text
+
+
+def decoded_literals(buffer: Buffer) -> list[tuple[int, str, str, str]]:
+    """(buffer index, literal, kind, decoded text) for encoded string literals in the added lines."""
+    found: list[tuple[int, str, str, str]] = []
+    for index, line in enumerate(buffer.lines):
+        for match in _ENCODED_LITERAL.finditer(line):
+            decoded = _decode_literal(match.group(2))
+            if decoded is not None:
+                found.append((index, match.group(2), *decoded))
+                if len(found) >= DECODED_LITERALS_PER_FILE:
+                    return found
+    return found
 
 
 @dataclass
@@ -244,6 +289,7 @@ class _ReleaseScan:
         wanted = {spec.id for spec in specs}
         if buffer.lines and any(line.strip() for line in buffer.lines):
             self._run_yara(context, wanted)
+            self._run_decoded(context, wanted & DECODED_RULES)
         for rule_id, line, matched in structural.run(context, wanted):
             self._add(self.pack.specs[rule_id], path, line, matched)
 
@@ -275,6 +321,38 @@ class _ReleaseScan:
             found = self._first_new_instance(spec, match, context, starts)
             if found is not None:
                 self._add(spec, context.path, *found)
+
+    def _run_decoded(self, context: structural.FileContext, wanted: set[str]) -> None:
+        """Network-host rules on decoded base64 and hex literals this release added."""
+        import yara
+
+        done = {hit.rule for hit in self.report.hits + self.report.info if hit.path == context.path}
+        wanted = set(wanted) - done
+        if not wanted:
+            return
+        for index, literal, kind, text in decoded_literals(context.buffer):
+            line_no, line = context.buffer.line_at(index)
+            if not self._is_new(literal, context.new, context.old_texts):
+                continue
+            try:
+                matches = self.pack.compiled.match(data=text.encode("utf-8", "surrogatepass"),
+                                                   timeout=YARA_TIMEOUT_SECONDS)
+            except yara.TimeoutError:
+                continue
+            for match in matches:
+                spec = self.pack.specs.get(match.rule)
+                if spec is None or spec.id not in wanted:
+                    continue
+                if spec.comments == "skip" and is_comment_line(line):
+                    continue
+                fragments = [inst.matched_data.decode("utf-8", "replace")
+                             for string in match.strings for inst in string.instances]
+                if spec.confirm and not any(structural.confirm(spec.confirm, item) for item in fragments):
+                    continue
+                self._add(spec, context.path, line_no, f"{kind} -> {text}")
+                wanted.discard(spec.id)
+            if not wanted:
+                return
 
     def _rules_in(self, text: str) -> set[str]:
         import yara

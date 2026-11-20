@@ -113,7 +113,8 @@ Localhost `/health` adds `dash_last_published_at` and `dash_last_error`.
 | `HUNTER_TOP_N` | `15000` | Packages watched per ecosystem. |
 | `HUNTER_NPM_TOP_N` | same as `HUNTER_TOP_N` | A different size for npm. |
 | `HUNTER_SKIP_PYPI` / `HUNTER_SKIP_NPM` | | `1` turns off that ecosystem. |
-| `HUNTER_POLL_INTERVAL` | `300` | Seconds between polls. |
+| `HUNTER_POLL_INTERVAL` | `300` | Seconds between npm polls. |
+| `HUNTER_PYPI_POLL_INTERVAL` | `60` | Seconds between PyPI changelog polls (at least 60), so a release pulled within minutes is still downloaded. |
 | `HUNTER_WATCHLIST_REFRESH` | `21600` | Seconds between watchlist refreshes. |
 | `HUNTER_SKIP_DEP_INSPECT` | | `1` skips checking new dependencies. |
 | `HUNTER_DEP_INSPECT_LIMIT` | `3` | New dependencies checked per release. |
@@ -330,4 +331,6 @@ A YARA and Python rule pack under `hunter/rules/` reads the text each release ad
 
 | Variable | Default | What it does |
 |---|---|---|
-| `HUNTER_RULES` | `off` | `on` turns the rule pack on in the classifier. |
+| `HUNTER_RULES` | `off` (`on` in `deploy/hunter.service`) | `on` turns the rule pack on in the classifier. The shipped systemd unit sets it `on`, so a deployment runs the rules unless the env file sets `HUNTER_RULES=off`. |
+
+The network-host rules (`net_oast_host`, `net_tunnel_host`, `net_paste_drop`, `net_exfil_messenger`, `net_ip_lookup`, `net_shortener`, `net_abused_tld`, `net_raw_ip_url`, `cloud_imds`) also read base64 and hex string literals the release added, after decoding them. Such a hit names the encoding in its matched text, for example `base64 -> https://...`.

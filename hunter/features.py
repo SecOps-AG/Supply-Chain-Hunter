@@ -759,6 +759,32 @@ def new_top_level_module(old_files: dict[str, str], new_files: dict[str, str], m
     ]
 
 
+def _module_paths(install_map: dict[str, str], module: str) -> list[str]:
+    return [
+        path
+        for target, path in sorted(install_map.items())
+        if target == f"{module}.py" or (target.startswith(f"{module}/") and target.endswith(".py"))
+    ]
+
+
+def module_gained_indicators(old_files: dict[str, str], new_files: dict[str, str], module: str) -> list[tuple[str, list[str]]]:
+    """Files of a top-level module the previous release already installed, with payload
+    indicators no file of that module had before. Empty when the module is new or gained nothing."""
+    old_map = _install_map(old_files)
+    old_tops = {target.split("/", 1)[0] for target in old_map}
+    if module not in old_tops and f"{module}.py" not in old_tops:
+        return []
+    before: set[str] = set()
+    for path in _module_paths(old_map, module):
+        before.update(payload_indicators(old_files[path]))
+    found: list[tuple[str, list[str]]] = []
+    for path in _module_paths(_install_map(new_files), module):
+        gained = [item for item in payload_indicators(new_files[path]) if item not in before]
+        if gained:
+            found.append((path, gained))
+    return found
+
+
 def _is_own_top(top: str, name: str) -> bool:
     stem = top
     for ending in (".py", ".pth", ".libs", "-stubs"):
@@ -834,6 +860,14 @@ def wheel_only_files(old_files: dict[str, str], new_files: dict[str, str]) -> li
             continue
         found.append(path)
     return found
+
+
+def sdist_dropped(old_files: dict[str, str], new_files: dict[str, str]) -> bool:
+    """The previous release shipped an sdist and this one ships only a wheel."""
+    old_sdist = any(path.startswith("sdist/") for path in old_files)
+    new_sdist = any(path.startswith("sdist/") for path in new_files)
+    new_wheel = any(path.startswith("wheel/") for path in new_files)
+    return old_sdist and new_wheel and not new_sdist
 
 
 def _maturin_data_lines(text: str) -> set[str]:
@@ -998,5 +1032,6 @@ def extract_features(
         new_binary=new_executable_binary(old_files, new_files),
         outside_package_files=outside_package_files(old_files, new_files, meta.name),
         wheel_only_files=wheel_only_files(old_files, new_files),
+        sdist_dropped=sdist_dropped(old_files, new_files),
         build_config_changes=build_config_changes(old_files, new_files),
     )

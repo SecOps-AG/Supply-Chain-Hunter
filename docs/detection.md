@@ -75,6 +75,8 @@ Before Pass B, Hunter counts the tokens it is about to send. A release over `HUN
 | `benign` | Nothing stood out. |
 | `deferred` | Jev failed (timeout, 503, missing answer). Retried later; after `HUNTER_AI_MAX_ATTEMPTS` failures it goes to the human review queue. |
 
+A watched PyPI release whose whole release is removed (`remove release` in the changelog) before Hunter finished scanning it goes straight to the human review queue as kind `removed_before_scan`. Its job and retries stop, since the archive can no longer be downloaded.
+
 ### Local rules
 
 These run on every diff. They can raise the score to a minimum level ("floor") but are not a verdict on their own. They still apply when Jev can't read the release.

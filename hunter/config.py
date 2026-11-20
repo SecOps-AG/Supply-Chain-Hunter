@@ -256,7 +256,9 @@ def _unit_interval(name: str, default: float) -> float:
 class Config:
     db_path: Path = Path("hunter.sqlite3")
     top_n: int = 15000
+    # npm poll. PyPI has its own, shorter interval so a release pulled within minutes is still seen.
     poll_interval: float = 300.0
+    pypi_poll_interval: float = 60.0
     watchlist_refresh: float = 6 * 3600
     # User watchlist (hunter/inventory). HUNTER_WATCH_MODE=all watches the popular lists plus
     # the user's names; watched polls only the user's names. HUNTER_ALERT_SCOPE=watched sends
@@ -487,6 +489,7 @@ class Config:
             db_path=Path(os.environ.get("HUNTER_DB", "hunter.sqlite3")),
             top_n=top_n,
             poll_interval=float(os.environ.get("HUNTER_POLL_INTERVAL", "300")),
+            pypi_poll_interval=max(60.0, float(os.environ.get("HUNTER_PYPI_POLL_INTERVAL", "60"))),
             watchlist_refresh=float(os.environ.get("HUNTER_WATCHLIST_REFRESH", str(6 * 3600))),
             watch_mode=watch_mode,
             alert_scope=alert_scope,

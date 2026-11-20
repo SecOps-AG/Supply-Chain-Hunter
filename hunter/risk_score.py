@@ -42,6 +42,7 @@ SIGNAL_WEIGHTS: dict[str, tuple[str, int, str]] = {
     "lifecycle_script_edits": ("lifecycle_script_edits", 8, "Changed an install lifecycle script"),
     "publisher_changed": ("publisher_changed", 8, "Publisher changed"),
     "wheel_only_file": ("wheel_only_file", 8, "Wheel holds files the source does not"),
+    "sdist_dropped": ("sdist_dropped", 8, "Release dropped the source archive earlier releases had"),
     "build_config_change": ("build_config_change", 6, "Build configuration changed"),
     "short_release_gap": ("short_release_gap", 3, "Released very soon after the previous version"),
     "binary_media_change": ("binary_media_change", 3, "Binary or media files changed"),

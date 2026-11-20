@@ -93,6 +93,7 @@ from hunter.registry import (
     pypi_events_to_versions,
     newest_version,
     pypi_predecessor,
+    pypi_removed_releases,
     pypi_version_events,
     refresh_watchlists,
     versions_after,
@@ -793,6 +794,16 @@ def _queue_npm_versions(
     return queued, "ok"
 
 
+def _flag_removed_before_scan(db: Database, ecosystem: str, name: str, version: str) -> bool:
+    """Review item for a watched release removed before a finished scan. False when it was scanned."""
+    existing = db.get_release(ecosystem, name, version)
+    if existing is not None and not _release_needs_retry(existing):
+        return False
+    db.note_removed_before_scan(ecosystem, name, version)
+    log.warning("watched release %s/%s %s was removed before it was scanned", ecosystem, name, version)
+    return True
+
+
 def poll_pypi(
     db: Database,
     feed: PypiSerialFeed,
@@ -838,6 +849,8 @@ def poll_pypi(
             elif state == "refused":
                 blocked = True
                 break
+    for name, version, _rank in pypi_removed_releases(events, targets):
+        _flag_removed_before_scan(db, "pypi", name, version)
     # A release the cap refused stays inside the feed window until a later poll can store it.
     if not blocked:
         serial = max_serial(events)
@@ -1961,7 +1974,7 @@ def serve(
                     target=_feed_loop,
                     kwargs={
                         "stop": stop,
-                        "interval": config.poll_interval,
+                        "interval": config.pypi_poll_interval,
                         "fn": lambda: _poll_pypi_safely(db, config, pypi_feed, transport),
                     },
                     name="hunter-pypi",

@@ -61,6 +61,7 @@ class CodeFeatures:
     new_binary: bool = False
     outside_package_files: list[str] = field(default_factory=list)
     wheel_only_files: list[str] = field(default_factory=list)
+    sdist_dropped: bool = False
     build_config_changes: list[str] = field(default_factory=list)
     rule_report: RuleReport | None = None
 
@@ -86,6 +87,7 @@ class CodeFeatures:
             or self.behavior_chains
             or self.outside_package_files
             or self.wheel_only_files
+            or self.sdist_dropped
             or self.build_config_changes
         )
 
@@ -152,6 +154,8 @@ class CodeFeatures:
         if self.wheel_only_files:
             shown = ",".join(self.wheel_only_files[:6])
             signals.append(f"wheel_only_file:{shown}")
+        if self.sdist_dropped:
+            signals.append("sdist_dropped")
         if self.build_config_changes:
             shown = ",".join(self.build_config_changes[:4])
             signals.append(f"build_config_change:{shown}")
