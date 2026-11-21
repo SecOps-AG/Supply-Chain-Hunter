@@ -31,6 +31,11 @@
       "test": "tests/test_rules.py::test_rule_hits_its_line[js_obfuscator_names]",
       "evidence": "internal rules review, 2026-10-09"
     },
+    "net_chat_webhook_send": {
+      "floor": "review",
+      "test": "tests/test_rules.py::test_rule_hits_its_line[net_chat_webhook_send]",
+      "evidence": "npm compromise that posted env, host and project files to a Telegram bot, 2026-11-20"
+    },
     "net_oast_host": {
       "floor": "review",
       "test": "tests/test_rules.py::test_rule_hits_its_line[net_oast_host]",
