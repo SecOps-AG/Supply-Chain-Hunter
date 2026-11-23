@@ -9,6 +9,7 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from ..archives import BINARY_MARKER
 from ..patterns import HOST
 from ..patterns import _host_allowed as host_allowed
 from ..triage import STARTUP_HOOK_NAMES, new_pth_import_lines
@@ -26,6 +27,28 @@ PY_EXEC = re.compile(r"\b(exec|eval)\s*\(")
 DEPENDENCY_KEYS = ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies")
 GIT_SHORTHAND = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[0-9a-f]{7,40}$")
 REMOTE_ARCHIVE = re.compile(r"^https?://\S+\.(tgz|tar\.gz|tar|zip)(?:[?#]\S*)?$", re.IGNORECASE)
+# Chat bot and webhook endpoints that accept posted data. The group is the API base checked against the old release.
+CHAT_ENDPOINT = re.compile(
+    r"(api\.telegram\.org)/(?:file/)?bot"
+    r"|(?:canary\.|ptb\.)?(discord(?:app)?\.com/api)/(?:v\d+/)?webhooks/"
+    r"|(hooks\.slack\.com)/services/",
+    re.IGNORECASE,
+)
+# A credential written into the release: a bot token, a webhook id and token, or a Slack hook path.
+CHAT_SECRET = re.compile(
+    r"(?<=/bot)\d{5,12}:[\w-]{8,}"
+    r"|(?<=/webhooks/)\d{6,20}/[\w-]{8,}"
+    r"|(?<=/services/)T\w{6,}/B\w{6,}/\w{8,}"
+    r"|(?<=[\"'`])\d{5,12}:[\w-]{8,}(?=[\"'`])",
+    re.IGNORECASE,
+)
+# Reads of the environment, host or user details, or local files.
+COLLECTS = re.compile(
+    r"\bprocess\.env\b|\bos\.environ\b|\bos\.getenv\("
+    r"|\bos(?:_\d+)?\.(?:hostname|userInfo|networkInterfaces|platform|homedir|release|arch|cpus)\s*\("
+    r"|\bsocket\.gethostname\b|\bgetpass\.getuser\b|\bplatform\.(?:node|uname)\(|\bos\.(?:getlogin|uname)\("
+    r"|\breadFile(?:Sync)?\s*\(|\breaddir(?:Sync)?\s*\(|\bcreateReadStream\s*\(|\bopen\(|\.read_(?:text|bytes)\("
+)
 
 
 @dataclass
@@ -285,6 +308,48 @@ def _new_host(context: FileContext) -> Iterator[tuple[int, str]]:
         return
 
 
+def _new_chat_endpoints(context: FileContext) -> Iterator[tuple[int, str]]:
+    """Chat endpoints in the added code, plain or decoded or joined, whose API base no old file names."""
+    from .engine import is_comment_line
+
+    buffer = context.buffer
+    found = [(buffer.line_numbers[index], "", line) for index, line in enumerate(buffer.lines)
+             if CHAT_ENDPOINT.search(line) and not is_comment_line(line)]
+    for index, _literal, kind, text in buffer.decoded:
+        line_no, line = buffer.line_at(index)
+        if CHAT_ENDPOINT.search(text) and not is_comment_line(line):
+            found.append((line_no, f"{kind} -> ", text))
+    if not found:
+        return
+    olds = [text.lower() for text in context.old_files.values() if not text.startswith(BINARY_MARKER)]
+    for line_no, form, text in found:
+        for match in CHAT_ENDPOINT.finditer(text):
+            base = next(group for group in match.groups() if group).lower()
+            if any(base in old for old in olds):
+                continue
+            window = text[max(0, match.start() - 40): match.end() + 120].strip()
+            yield line_no, form + CHAT_SECRET.sub("<token>", window)
+            break
+
+
+def _chat_webhook(context: FileContext) -> Iterator[tuple[int, str]]:
+    for found in _new_chat_endpoints(context):
+        yield found
+        return
+
+
+def _chat_webhook_send(context: FileContext) -> Iterator[tuple[int, str]]:
+    """A new chat endpoint, a credential written into the added code, and a read of env, host or files."""
+    added = context.buffer.text
+    if not COLLECTS.search(added):
+        return
+    if not CHAT_SECRET.search(added) and not any(CHAT_SECRET.search(item[3]) for item in context.buffer.decoded):
+        return
+    for found in _new_chat_endpoints(context):
+        yield found
+        return
+
+
 RULES = {
     "h_raw_ip": _raw_ip,
     "js_hidden_whitespace": lambda context: _hidden_whitespace(context, JS_EVAL),
@@ -296,6 +361,8 @@ RULES = {
     "pth_import_line": _pth_import_line,
     "py_startup_hook_file": _startup_hook_file,
     "startup_hook_payload": _startup_hook_payload,
+    "net_chat_webhook": _chat_webhook,
+    "net_chat_webhook_send": _chat_webhook_send,
 }
 
 

@@ -74,3 +74,12 @@ def test_binary_and_short_literals_are_ignored():
     blob = base64.b64encode(bytes(range(256))).decode()
     short = _b64("https://x.io")
     assert not {rule for rule in _rules({}, {"pkg/b.py": f'B = "{blob}"\nS = "{short}"\n'}) if rule.startswith("net_")}
+
+
+def test_split_and_joined_literals_are_read_whole():
+    concat = "const u = 'https://abc.oas' + 'tify.com/x';\n"
+    joined = "const u = [\n  'https://abc.oas',\n  'tify.com/x',\n].join('');\n"
+    for text in (concat, joined):
+        hits = [hit for hit in _hits({}, {"lib/j.js": text}) if hit.rule == "net_oast_host"]
+        assert hits and hits[0].matched.startswith("joined ")
+    assert "net_oast_host" not in _rules({"lib/j.js": joined}, {"lib/j.js": joined + "x();\n"})

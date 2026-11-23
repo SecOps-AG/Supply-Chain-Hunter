@@ -83,6 +83,13 @@ PYTHON_RULES = (
              "new startup hook that loads a new top-level module, or an existing one that gained code in this "
              "release, which decodes and runs code or reaches the network",
              source="python"),
+    RuleSpec("net_chat_webhook", "weak", expand("code,bundle,manifest,workflow"), "both",
+             "Telegram bot API, Discord webhook or Slack webhook endpoint that no file in the old release named",
+             comments="skip", source="python"),
+    RuleSpec("net_chat_webhook_send", "weak", expand("code,bundle,manifest,workflow"), "both",
+             "new chat bot or webhook endpoint with a token written into the added code, which also reads "
+             "the environment, host or user details, or local files",
+             comments="skip", source="python"),
     RuleSpec("h_new_host", "info", expand("code,manifest"), "both",
              "URL host not on the allowlist and not in the old file", comments="skip", source="python"),
 )

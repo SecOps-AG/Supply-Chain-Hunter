@@ -37,6 +37,15 @@ DECODED_RULES = frozenset({
 DECODED_LITERALS_PER_FILE = 64
 _ENCODED_LITERAL = re.compile(r"""(["'])([A-Za-z0-9+/_-]{16,4096}={0,2})\1""")
 _HEX_LITERAL = re.compile(r"^(?:[0-9a-fA-F]{2})+$")
+# String literals glued with + or an empty-string join, so a URL split into pieces reads whole.
+_STR = r"""(?:'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*")"""
+_JOINED = re.compile(
+    rf"\[\s*{_STR}(?:\s*,\s*{_STR})+\s*,?\s*\]\s*\.join\(\s*(?:''|\"\")\s*\)"
+    rf"|(?:''|\"\")\s*\.join\(\s*[\[(]\s*{_STR}(?:\s*,\s*{_STR})+\s*,?\s*[\])]\s*\)"
+    rf"|{_STR}(?:\s*\+\s*{_STR})+"
+)
+_PIECE = re.compile(r"""'((?:[^'\\\n]|\\.)*)'|"((?:[^"\\\n]|\\.)*)\"""")
+_ENCODED_BODY = re.compile(r"[A-Za-z0-9+/_-]{16,4096}={0,2}")
 
 
 def _decode_literal(literal: str) -> tuple[str, str] | None:
@@ -71,6 +80,30 @@ def decoded_literals(buffer: Buffer) -> list[tuple[int, str, str, str]]:
                 found.append((index, match.group(2), *decoded))
                 if len(found) >= DECODED_LITERALS_PER_FILE:
                     return found
+    joined = _joined_literals(buffer)
+    if not joined:
+        return found
+    return sorted(found + joined, key=lambda item: item[0])[:DECODED_LITERALS_PER_FILE]
+
+
+def _joined_literals(buffer: Buffer) -> list[tuple[int, str, str, str]]:
+    """(buffer index, source text, kind, joined text) for literals glued into one string with no spaces."""
+    found: list[tuple[int, str, str, str]] = []
+    text = buffer.text
+    if "'" not in text and '"' not in text:
+        return found
+    for match in _JOINED.finditer(text):
+        joined = "".join(a or b for a, b in _PIECE.findall(match.group(0)))
+        if len(joined) < 8 or any(char.isspace() for char in joined):
+            continue
+        index = text.count("\n", 0, match.start())
+        decoded = _decode_literal(joined) if _ENCODED_BODY.fullmatch(joined) else None
+        if decoded is not None:
+            found.append((index, match.group(0), f"joined {decoded[0]}", decoded[1]))
+        else:
+            found.append((index, match.group(0), "joined", joined))
+        if len(found) >= DECODED_LITERALS_PER_FILE:
+            break
     return found
 
 
@@ -84,6 +117,10 @@ class Buffer:
     @cached_property
     def text(self) -> str:
         return "\n".join(self.lines)
+
+    @cached_property
+    def decoded(self) -> list[tuple[int, str, str, str]]:
+        return decoded_literals(self)
 
     def line_at(self, index: int) -> tuple[int, str]:
         return self.line_numbers[index], self.lines[index]
@@ -330,7 +367,7 @@ class _ReleaseScan:
         wanted = set(wanted) - done
         if not wanted:
             return
-        for index, literal, kind, text in decoded_literals(context.buffer):
+        for index, literal, kind, text in context.buffer.decoded:
             line_no, line = context.buffer.line_at(index)
             if not self._is_new(literal, context.new, context.old_texts):
                 continue
